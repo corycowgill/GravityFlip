@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#06080f" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>Gravity Flip Lab</title>
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <div id="app">
+    <canvas id="game" width="960" height="540"></canvas>
+
+    <div id="hud" class="hud hidden">
+      <div class="hud-left">
+        <button class="ghost" id="btn-menu" aria-label="Back to menu">&#9776;</button>
+        <span id="level-name">Lab 1-1</span>
+      </div>
+      <div class="hud-right">
+        <button class="ghost" id="btn-restart" aria-label="Restart level">&#x21bb;</button>
+      </div>
+    </div>
+
+    <div id="touch" class="touch hidden" aria-hidden="true">
+      <div class="touch-grid">
+        <div class="touch-cell" data-dir="up">&#x2191;</div>
+        <div class="touch-cell" data-dir="left">&#x2190;</div>
+        <div class="touch-cell" data-dir="right">&#x2192;</div>
+        <div class="touch-cell" data-dir="down">&#x2193;</div>
+      </div>
+    </div>
+
+    <div id="overlay-menu" class="overlay">
+      <div class="title">
+        <span class="t-grav">GRAVITY</span>
+        <span class="t-flip">FLIP</span>
+        <span class="t-lab">LAB</span>
+      </div>
+      <p class="tagline">Rotate the world. Don't fall apart.</p>
+      <div class="menu-buttons">
+        <button class="primary" id="btn-play">Play</button>
+        <button id="btn-levels">Levels</button>
+        <button id="btn-how">How to Play</button>
+      </div>
+      <div class="footer-hint">Swipe to flip gravity &middot; Arrow keys / WASD on desktop</div>
+    </div>
+
+    <div id="overlay-levels" class="overlay hidden">
+      <h2>Levels</h2>
+      <div id="level-grid" class="level-grid"></div>
+      <button id="btn-levels-back" class="ghost">Back</button>
+    </div>
+
+    <div id="overlay-how" class="overlay hidden">
+      <h2>How to Play</h2>
+      <ul class="how-list">
+        <li><b>Goal:</b> reach the glowing exit.</li>
+        <li><b>You can't jump.</b> You flip gravity.</li>
+        <li><b>Mobile:</b> swipe up / down / left / right.</li>
+        <li><b>Desktop:</b> arrow keys or WASD.</li>
+        <li><b>Tap / Space:</b> hold for slow-mo (later levels).</li>
+        <li>Spikes kill you. So do lasers. So does the void.</li>
+      </ul>
+      <button id="btn-how-back" class="ghost">Back</button>
+    </div>
+
+    <div id="overlay-win" class="overlay hidden">
+      <h2 class="win-title">CLEARED</h2>
+      <p id="win-stats" class="win-stats"></p>
+      <div class="menu-buttons">
+        <button class="primary" id="btn-next">Next Level</button>
+        <button id="btn-replay">Replay</button>
+        <button id="btn-win-menu">Levels</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
