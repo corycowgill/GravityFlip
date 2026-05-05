@@ -8,17 +8,23 @@ export const GRAV = {
   RIGHT: { x: 1, y: 0 },
 };
 
-// Tuned constants — adjusted for snappy, momentum-preserving feel.
-const ACCEL = 2100;          // gravity acceleration (px/s^2). Snappier than before.
-const MAX_FALL = 760;        // terminal velocity along gravity axis.
-const BOUNCE_SPEED = 720;    // launch speed off bounce pads (any axis).
-const FLIP_COOLDOWN = 0.04;  // sec between accepted flips. Shorter = crisper.
-const FLIP_CARRY = 0.55;     // fraction of perpendicular speed preserved into new gravity axis.
-const ROT_SPEED = 720;       // visual rotation deg/s.
-const GROUND_DRAG = 18.0;    // settle perpendicular velocity when grounded.
-const LAND_IMPACT_THRESH = 380; // velocity that counts as a "hard" landing.
-const GLASS_BREAK_THRESH = 360; // velocity to break glass.
-const BUFFER_TIME = 0.14;    // input buffer window for queued flips.
+// Tuned constants.
+//
+// Arc physics: when gravity flips, the player's full velocity is preserved.
+// Gravity simply changes direction and reshapes the velocity over time, which
+// produces real parabolic trajectories — flipping while running launches you
+// in an arc, and you have to factor your current speed into where you'll land.
+const ACCEL = 2100;          // gravity acceleration (px/s^2)
+const MAX_FALL = 800;        // terminal velocity along gravity axis
+const MAX_PERP = 900;        // soft cap on the perpendicular axis (prevents runaway)
+const BOUNCE_SPEED = 760;    // launch speed off bounce pads (any axis)
+const FLIP_COOLDOWN = 0.04;  // sec between accepted flips
+const ROT_SPEED = 720;       // visual rotation deg/s
+const GROUND_DRAG = 14.0;    // settle perpendicular velocity when grounded
+const AIR_DRAG = 0.18;       // very light air drag on perpendicular axis (per second)
+const LAND_IMPACT_THRESH = 380;
+const GLASS_BREAK_THRESH = 360;
+const BUFFER_TIME = 0.14;
 const SQUASH_TIME = 0.13;
 
 export class Player {
@@ -95,19 +101,13 @@ export class Player {
     this.flipCooldown = FLIP_COOLDOWN;
     this.flipFlash = 0.18;
 
-    // Carry forward perpendicular momentum into the new "fall" axis,
-    // and zero out the new perpendicular axis so the flip feels decisive.
-    if (g.x !== 0) {
-      // New fall axis is X. The "perpendicular" velocity used to be along Y.
-      // Convert a fraction of the speed magnitude into vx along g.x sign.
-      const carry = Math.abs(this.vy) * FLIP_CARRY;
-      this.vx = Math.sign(g.x) * carry;
-      this.vy = 0;
-    } else {
-      const carry = Math.abs(this.vx) * FLIP_CARRY;
-      this.vy = Math.sign(g.y) * carry;
-      this.vx = 0;
-    }
+    // ARC PHYSICS: preserve full velocity through the flip.
+    // Whatever vx/vy the player has at this instant is kept. Gravity in the
+    // new direction will reshape it over time, producing real parabolic
+    // trajectories — flipping while running launches the player in an arc,
+    // and they have to plan around momentum + distance.
+    //
+    // We do NOT zero or scale any axis here.
 
     if (g === GRAV.DOWN)  this.visualRotTarget = 0;
     if (g === GRAV.UP)    this.visualRotTarget = 180;
@@ -138,12 +138,19 @@ export class Player {
     const g = level.gravityAt(cx, cy, this.gravity);
     this.effGravity = g;
 
-    // Apply gravity (slow-mo is now applied at the Game.update level via dt scaling
-    // so it correctly affects everything, not just the player.)
+    // Apply gravity (slow-mo is applied at the Game.update level via dt scaling).
     this.vx += g.x * ACCEL * dt;
     this.vy += g.y * ACCEL * dt;
 
-    // Cap fall speed along gravity axis
+    // Light air drag on the perpendicular axis only — keeps arcs from being
+    // perfectly endless without robbing them of feel.
+    if (!this.grounded) {
+      const dragFactor = Math.max(0, 1 - AIR_DRAG * dt);
+      if (g.x !== 0) this.vy *= dragFactor;
+      else           this.vx *= dragFactor;
+    }
+
+    // Cap fall speed along the gravity axis at terminal velocity.
     if (g.x !== 0) {
       if (g.x > 0) this.vx = Math.min(this.vx, MAX_FALL);
       else this.vx = Math.max(this.vx, -MAX_FALL);
@@ -151,6 +158,14 @@ export class Player {
     if (g.y !== 0) {
       if (g.y > 0) this.vy = Math.min(this.vy, MAX_FALL);
       else this.vy = Math.max(this.vy, -MAX_FALL);
+    }
+    // Soft cap perpendicular axis (handles edge cases where flips chain a lot).
+    if (g.x !== 0) {
+      if (this.vy > MAX_PERP) this.vy = MAX_PERP;
+      if (this.vy < -MAX_PERP) this.vy = -MAX_PERP;
+    } else {
+      if (this.vx > MAX_PERP) this.vx = MAX_PERP;
+      if (this.vx < -MAX_PERP) this.vx = -MAX_PERP;
     }
 
     // Track velocity at impact for landing FX

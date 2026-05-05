@@ -157,6 +157,47 @@ test("Buffered flip applies when cooldown ends", () => {
   assert(p.gravity === GRAV.RIGHT, "buffered flip should apply");
 });
 
+// 7c. ARC PHYSICS: flipping while moving preserves velocity
+test("Arc physics: velocity is preserved through a flip", () => {
+  const lvl = new Level(LEVELS[0]);
+  const p = new Player();
+  p.spawnAt(lvl.spawn.x, lvl.spawn.y);
+  // Get the player moving rightward by flipping right and accelerating
+  p.tryFlip("right");
+  for (let i = 0; i < 60; i++) p.update(1/120, lvl, {});
+  const vxBefore = p.vx;
+  assert(vxBefore > 200, `should be moving right fast (vx=${vxBefore.toFixed(1)})`);
+  // Flip up — vx should be preserved (was the gravity axis, becomes perpendicular)
+  p.tryFlip("up");
+  // No update yet — check immediately
+  assert(Math.abs(p.vx - vxBefore) < 1, `vx should be preserved through flip (was ${vxBefore.toFixed(1)}, now ${p.vx.toFixed(1)})`);
+  // After one frame, vy should start ramping negative (gravity up); vx should still be ~vxBefore
+  p.update(1/120, lvl, {});
+  assert(p.vy < 0, "vy should turn negative under upward gravity");
+  assert(p.vx > vxBefore * 0.95, "vx should still be near previous magnitude");
+});
+
+// 7d. Flipping anti-parallel decelerates then reverses
+test("Arc physics: anti-parallel flip decelerates and reverses", () => {
+  const lvl = new Level(LEVELS[0]);
+  const p = new Player();
+  p.spawnAt(lvl.spawn.x, lvl.spawn.y);
+  p.tryFlip("right");
+  for (let i = 0; i < 80; i++) p.update(1/120, lvl, {});
+  const vxBefore = p.vx;
+  assert(vxBefore > 200, "should be moving right");
+  p.tryFlip("left");
+  // After enough time, vx should swing through 0 and become negative
+  let crossedZero = false, becameNeg = false;
+  for (let i = 0; i < 200; i++) {
+    p.update(1/120, lvl, {});
+    if (Math.abs(p.vx) < 30) crossedZero = true;
+    if (p.vx < -100) { becameNeg = true; break; }
+  }
+  assert(crossedZero, "vx should pass through zero during deceleration");
+  assert(becameNeg, "vx should reverse direction after enough time");
+});
+
 // 8. Save round-trip
 const { Save } = await import("../js/save.js");
 test("Save round-trip", () => {

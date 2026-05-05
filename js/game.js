@@ -30,7 +30,29 @@ export class Game {
     // Camera shake
     this.shakeT = 0;
     this.shakeMag = 0;
+    // Door animation (shared across all doors in a level): 0=closed, 1=open.
+    this.doorAnim = 0;
+    this.doorAnimTarget = 0;
+    // Ambient drifting motes for atmosphere (drawn behind the level).
+    this.ambient = [];
+    this._initAmbient();
+    // Sparks emitted at laser endpoints.
+    this.sparks = [];
     this._hookInput();
+  }
+
+  _initAmbient() {
+    const W = COLS * TILE, H = ROWS * TILE;
+    for (let i = 0; i < 36; i++) {
+      this.ambient.push({
+        x: Math.random() * W,
+        y: Math.random() * H,
+        z: 0.3 + Math.random() * 0.7,           // depth: 0.3 = far, 1.0 = near
+        size: 0.6 + Math.random() * 1.6,
+        phase: Math.random() * Math.PI * 2,
+        hue: Math.random() < 0.5 ? "#5cf2ff" : "#ff5cf2",
+      });
+    }
   }
 
   _hookInput() {
@@ -185,6 +207,10 @@ export class Game {
 
     if (this.flashT > 0) this.flashT = Math.max(0, this.flashT - dt);
 
+    // Door animation easing
+    const doorEase = Math.min(1, dtRaw * 9);
+    this.doorAnim += (this.doorAnimTarget - this.doorAnim) * doorEase;
+
     // Update lasers (now slowed by dt)
     for (const l of this.lasers) {
       if (l.period) {
@@ -288,14 +314,10 @@ export class Game {
   _updatePlatesAndDoors() {
     const lvl = this.level;
     if (!lvl) return;
-    // Find all plates, check if player or any crate is on them.
-    let anyActive = false;
     const plateActive = (gx, gy) => {
-      // Check player
       const p = this.player;
       const px = p.x + p.w / 2, py = p.y + p.h / 2;
       if (Math.floor(px / TILE) === gx && Math.floor((py + 6) / TILE) === gy) return true;
-      // Check any dyn obj
       for (const o of this.dynObjs) {
         const ox = o.x + o.w / 2, oy = o.y + o.h / 2;
         if (Math.floor(ox / TILE) === gx && Math.floor((oy + 4) / TILE) === gy) return true;
@@ -303,21 +325,27 @@ export class Game {
       return false;
     };
     let activePlates = 0, totalPlates = 0;
+    this._activePlates = new Set();
     for (let y = 0; y < ROWS; y++) {
       for (let x = 0; x < COLS; x++) {
         if (lvl.baseGrid[y * COLS + x] === T.PLATE) {
           totalPlates++;
-          if (plateActive(x, y)) activePlates++;
+          if (plateActive(x, y)) {
+            activePlates++;
+            this._activePlates.add(y * COLS + x);
+          }
         }
       }
     }
-    // Doors open if ANY plate active (simple rule). Many designs use "all" — pick all.
     const open = totalPlates > 0 && activePlates >= totalPlates;
+    this.doorAnimTarget = open ? 1 : 0;
+    // Collision: solid until the door is mostly open.
+    const collidable = this.doorAnim < 0.55;
     for (let y = 0; y < ROWS; y++) {
       for (let x = 0; x < COLS; x++) {
         const i = y * COLS + x;
         if (lvl.baseGrid[i] === T.DOOR) {
-          lvl.grid[i] = open ? T.EMPTY : T.DOOR;
+          lvl.grid[i] = collidable ? T.DOOR : T.EMPTY;
         }
       }
     }
@@ -522,26 +550,32 @@ export class Game {
   render(ctx) {
     if (this.state === "menu") {
       this._renderBackground(ctx);
+      this._renderVignette(ctx);
       return;
     }
-    // Camera shake offset (random per frame, magnitude decays with shakeT)
+    // Camera shake offset
     let sx = 0, sy = 0;
     if (this.shakeT > 0 && this.shakeMag > 0) {
       const k = this.shakeMag * (this.shakeT / 0.35);
       sx = (Math.random() * 2 - 1) * k;
       sy = (Math.random() * 2 - 1) * k;
     }
+
+    this._renderBackground(ctx);
+
     ctx.save();
     ctx.translate(sx, sy);
-    this._renderBackground(ctx);
     this._renderLevel(ctx);
     this._renderObjects(ctx);
+    this._renderSparks(ctx);
     this._renderLasers(ctx);
     this._renderPlayer(ctx);
     this._renderParticles(ctx);
     this._renderFlipFx(ctx);
     ctx.restore();
-    // Overlays should NOT shake (they're UI)
+
+    this._renderVignette(ctx);
+    if (this.state !== "menu") this._renderScanlines(ctx);
     this._renderFlash(ctx);
     if (this.state === "dead") this._renderDeathOverlay(ctx);
     if (this.state === "win") this._renderWinOverlay(ctx);
@@ -550,30 +584,92 @@ export class Game {
 
   _renderSlowmoVignette(ctx) {
     const W = this.engine.width, H = this.engine.height;
-    const grad = ctx.createRadialGradient(W/2, H/2, Math.min(W,H)*0.2, W/2, H/2, Math.max(W,H)*0.7);
+    const grad = ctx.createRadialGradient(W/2, H/2, Math.min(W,H)*0.18, W/2, H/2, Math.max(W,H)*0.7);
     grad.addColorStop(0, "rgba(92,242,255,0)");
-    grad.addColorStop(1, "rgba(92,242,255,0.18)");
+    grad.addColorStop(0.7, "rgba(92,242,255,0.06)");
+    grad.addColorStop(1, "rgba(92,242,255,0.22)");
+    ctx.save();
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, H);
+    // chromatic edge: thin cyan border ramp
+    ctx.strokeStyle = "rgba(92,242,255,0.35)";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(1, 1, W - 2, H - 2);
+    ctx.restore();
+  }
+
+  _renderVignette(ctx) {
+    const W = this.engine.width, H = this.engine.height;
+    const grad = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.45, W / 2, H / 2, Math.max(W, H) * 0.85);
+    grad.addColorStop(0, "rgba(0,0,0,0)");
+    grad.addColorStop(1, "rgba(0,0,0,0.55)");
     ctx.save();
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, W, H);
     ctx.restore();
   }
 
+  _renderScanlines(ctx) {
+    const W = this.engine.width, H = this.engine.height;
+    ctx.save();
+    ctx.globalAlpha = 0.06;
+    ctx.fillStyle = "#000";
+    for (let y = 0; y < H; y += 3) ctx.fillRect(0, y, W, 1);
+    ctx.restore();
+  }
+
+  _renderSparks(ctx) {
+    if (!this.sparks.length) return;
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    for (const s of this.sparks) {
+      const a = 1 - s.t / s.life;
+      ctx.fillStyle = `rgba(255,180,140,${a})`;
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
   _renderBackground(ctx) {
     const W = this.engine.width, H = this.engine.height;
-    // gradient
+
+    // Base gradient (does not rotate — feels stable)
+    const grad = ctx.createLinearGradient(0, 0, 0, H);
+    grad.addColorStop(0, "#0b0f24");
+    grad.addColorStop(0.55, "#070a18");
+    grad.addColorStop(1, "#03050d");
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, H);
+
+    // Layer 1: drifting glow blobs (additive cyan / magenta)
+    const t = this.t || 0;
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    const blobs = [
+      { cx: W * 0.20, cy: H * 0.30, r: H * 0.55, hue: "92,242,255", base: 0.08, drift: 1.0 },
+      { cx: W * 0.80, cy: H * 0.75, r: H * 0.55, hue: "255,92,242", base: 0.07, drift: 1.4 },
+      { cx: W * 0.50, cy: H * 0.50, r: H * 0.40, hue: "120,160,255", base: 0.05, drift: 0.7 },
+    ];
+    for (const b of blobs) {
+      const ox = Math.cos(t * 0.15 * b.drift) * 30;
+      const oy = Math.sin(t * 0.12 * b.drift) * 22;
+      const cx = b.cx + ox, cy = b.cy + oy;
+      const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, b.r);
+      g.addColorStop(0, `rgba(${b.hue},${b.base})`);
+      g.addColorStop(1, `rgba(${b.hue},0)`);
+      ctx.fillStyle = g;
+      ctx.fillRect(cx - b.r, cy - b.r, b.r * 2, b.r * 2);
+    }
+    ctx.restore();
+
+    // Layer 2: rotating subtle grid (rotates with gravity for the world-flip vibe)
     ctx.save();
     ctx.translate(W / 2, H / 2);
     ctx.rotate((this.bgRot * Math.PI) / 180);
     ctx.translate(-W / 2, -H / 2);
-    const grad = ctx.createLinearGradient(0, 0, 0, H);
-    grad.addColorStop(0, "#0a0f25");
-    grad.addColorStop(1, "#070912");
-    ctx.fillStyle = grad;
-    ctx.fillRect(-W, -H, W * 3, H * 3);
-
-    // grid (subtle)
-    ctx.strokeStyle = "rgba(92,242,255,0.06)";
+    ctx.strokeStyle = "rgba(92,242,255,0.045)";
     ctx.lineWidth = 1;
     const step = 32;
     for (let x = -W; x < W * 2; x += step) {
@@ -582,33 +678,78 @@ export class Game {
     for (let y = -H; y < H * 2; y += step) {
       ctx.beginPath(); ctx.moveTo(-W, y); ctx.lineTo(W * 2, y); ctx.stroke();
     }
+    // Brighter grid lines every 8 cells (lab corridor vibe)
+    ctx.strokeStyle = "rgba(92,242,255,0.10)";
+    for (let x = -W; x < W * 2; x += step * 8) {
+      ctx.beginPath(); ctx.moveTo(x, -H); ctx.lineTo(x, H * 2); ctx.stroke();
+    }
+    for (let y = -H; y < H * 2; y += step * 8) {
+      ctx.beginPath(); ctx.moveTo(-W, y); ctx.lineTo(W * 2, y); ctx.stroke();
+    }
+    ctx.restore();
+
+    // Layer 3: ambient drifting motes (atmospheric depth particles)
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    for (const m of this.ambient) {
+      m.x += Math.cos(m.phase + t * 0.4) * 0.25 * m.z;
+      m.y += Math.sin(m.phase + t * 0.5) * 0.18 * m.z;
+      if (m.x < -10) m.x = W + 10;
+      else if (m.x > W + 10) m.x = -10;
+      if (m.y < -10) m.y = H + 10;
+      else if (m.y > H + 10) m.y = -10;
+      const pulse = 0.5 + 0.5 * Math.sin(m.phase + t * 1.4);
+      const a = (0.20 + 0.25 * pulse) * m.z;
+      const r = m.size * (1 + pulse * 0.6) * m.z;
+      const rgb = m.hue === "#5cf2ff" ? "92,242,255" : "255,92,242";
+      const g = ctx.createRadialGradient(m.x, m.y, 0, m.x, m.y, r * 4);
+      g.addColorStop(0, `rgba(${rgb},${a})`);
+      g.addColorStop(0.4, `rgba(${rgb},${a * 0.4})`);
+      g.addColorStop(1, `rgba(${rgb},0)`);
+      ctx.fillStyle = g;
+      ctx.fillRect(m.x - r * 4, m.y - r * 4, r * 8, r * 8);
+    }
     ctx.restore();
   }
 
   _renderLevel(ctx) {
     const lvl = this.level;
     if (!lvl) return;
+
+    // Pass 1: shadow drop for solid walls (subtle depth offset, additive-dim).
+    ctx.save();
+    ctx.fillStyle = "rgba(0,0,0,0.35)";
+    for (let y = 0; y < ROWS; y++) {
+      for (let x = 0; x < COLS; x++) {
+        const t = lvl.getTile(x, y);
+        if (t === T.SOLID) ctx.fillRect(x * TILE + 2, y * TILE + 4, TILE, TILE);
+      }
+    }
+    ctx.restore();
+
+    // Pass 2: actual tiles, neighbor-aware
     for (let y = 0; y < ROWS; y++) {
       for (let x = 0; x < COLS; x++) {
         const tile = lvl.getTile(x, y);
         if (tile === T.EMPTY) continue;
-        drawTile(ctx, tile, x * TILE, y * TILE, this.t);
+        drawTile(ctx, lvl, x, y, this.t, this);
       }
     }
-    // gravity zone outlines
+
+    // Gravity zone outlines (drawn over tiles, dashed)
     if (lvl.gravityZones) {
       for (const z of lvl.gravityZones) {
         ctx.save();
-        ctx.strokeStyle = "rgba(255,92,242,0.35)";
+        ctx.fillStyle = "rgba(255,92,242,0.05)";
+        ctx.fillRect(z.x * TILE, z.y * TILE, z.w * TILE, z.h * TILE);
         ctx.setLineDash([6, 6]);
+        ctx.lineDashOffset = -this.t * 8;
+        ctx.strokeStyle = "rgba(255,92,242,0.45)";
         ctx.lineWidth = 1.5;
         ctx.strokeRect(z.x * TILE, z.y * TILE, z.w * TILE, z.h * TILE);
-        ctx.fillStyle = "rgba(255,92,242,0.06)";
-        ctx.fillRect(z.x * TILE, z.y * TILE, z.w * TILE, z.h * TILE);
-        // Arrow indicating gravity direction
         const cx = (z.x + z.w / 2) * TILE;
         const cy = (z.y + z.h / 2) * TILE;
-        drawArrow(ctx, cx, cy, z.dir, "rgba(255,92,242,0.5)");
+        drawArrow(ctx, cx, cy, z.dir, "rgba(255,92,242,0.55)");
         ctx.restore();
       }
     }
@@ -616,27 +757,80 @@ export class Game {
 
   _renderObjects(ctx) {
     for (const o of this.dynObjs) {
+      // Drop shadow
+      ctx.save();
+      ctx.fillStyle = "rgba(0,0,0,0.35)";
+      ctx.fillRect(o.x + 2, o.y + 4, o.w, o.h);
+      ctx.restore();
+
       ctx.save();
       if (o.kind === "crate") {
         const heavy = (o.props.weight || 1) > 1;
-        const fill = heavy ? "#7a5a2c" : "#a07642";
-        const stroke = heavy ? "#d6a86a" : "#e6c08a";
-        ctx.fillStyle = fill;
-        ctx.fillRect(o.x, o.y, o.w, o.h);
-        ctx.strokeStyle = stroke;
-        ctx.lineWidth = 2;
-        ctx.strokeRect(o.x + 1, o.y + 1, o.w - 2, o.h - 2);
-        // X cross
+        const fill1   = heavy ? "#5d3f1f" : "#8a5a2a";
+        const fill2   = heavy ? "#3a2614" : "#5b3a1c";
+        const trim    = heavy ? "#d4a25a" : "#e8c481";
+        const accent  = heavy ? "#ffb24a" : "#ffd884";
+
+        // Body gradient
+        const grad = ctx.createLinearGradient(o.x, o.y, o.x, o.y + o.h);
+        grad.addColorStop(0, fill1);
+        grad.addColorStop(1, fill2);
+        ctx.fillStyle = grad;
+        roundRect(ctx, o.x, o.y, o.w, o.h, 3);
+        ctx.fill();
+
+        // Plank groove (horizontal)
+        ctx.strokeStyle = "rgba(0,0,0,0.35)";
+        ctx.lineWidth = 1;
         ctx.beginPath();
-        ctx.moveTo(o.x + 4, o.y + 4); ctx.lineTo(o.x + o.w - 4, o.y + o.h - 4);
-        ctx.moveTo(o.x + o.w - 4, o.y + 4); ctx.lineTo(o.x + 4, o.y + o.h - 4);
+        ctx.moveTo(o.x + 2, o.y + o.h / 2);
+        ctx.lineTo(o.x + o.w - 2, o.y + o.h / 2);
         ctx.stroke();
+
+        // Trim
+        ctx.strokeStyle = trim;
+        ctx.lineWidth = 1.5;
+        roundRect(ctx, o.x + 1.5, o.y + 1.5, o.w - 3, o.h - 3, 2.5);
+        ctx.stroke();
+
+        // Corner rivets
+        ctx.fillStyle = accent;
+        const r = 1.5;
+        for (const [px, py] of [[o.x+4, o.y+4],[o.x+o.w-4, o.y+4],[o.x+4, o.y+o.h-4],[o.x+o.w-4, o.y+o.h-4]]) {
+          ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI * 2); ctx.fill();
+        }
+
+        // Heavy chevron glyph
+        if (heavy) {
+          ctx.strokeStyle = accent;
+          ctx.lineWidth = 1.6;
+          ctx.beginPath();
+          ctx.moveTo(o.x + 8, o.y + o.h/2 + 4); ctx.lineTo(o.x + o.w/2, o.y + o.h/2 - 2); ctx.lineTo(o.x + o.w - 8, o.y + o.h/2 + 4);
+          ctx.stroke();
+        }
       } else if (o.kind === "sphere") {
-        ctx.fillStyle = "#5cf2ff";
-        ctx.shadowColor = "#5cf2ff";
-        ctx.shadowBlur = 12;
+        const cx = o.x + o.w / 2, cy = o.y + o.h / 2, r = o.w / 2 - 1;
+        // Glow halo
+        ctx.globalCompositeOperation = "lighter";
+        const glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, r * 2.5);
+        glow.addColorStop(0, "rgba(92,242,255,0.6)");
+        glow.addColorStop(1, "rgba(92,242,255,0)");
+        ctx.fillStyle = glow;
+        ctx.fillRect(cx - r * 2.5, cy - r * 2.5, r * 5, r * 5);
+        ctx.globalCompositeOperation = "source-over";
+        // Body gradient
+        const body = ctx.createRadialGradient(cx - r * 0.4, cy - r * 0.4, r * 0.1, cx, cy, r);
+        body.addColorStop(0, "#d6f9ff");
+        body.addColorStop(0.6, "#5cf2ff");
+        body.addColorStop(1, "#1a8aa8");
+        ctx.fillStyle = body;
         ctx.beginPath();
-        ctx.arc(o.x + o.w / 2, o.y + o.h / 2, o.w / 2 - 1, 0, Math.PI * 2);
+        ctx.arc(cx, cy, r, 0, Math.PI * 2);
+        ctx.fill();
+        // Highlight
+        ctx.fillStyle = "rgba(255,255,255,0.55)";
+        ctx.beginPath();
+        ctx.arc(cx - r * 0.35, cy - r * 0.4, r * 0.25, 0, Math.PI * 2);
         ctx.fill();
       }
       ctx.restore();
@@ -644,112 +838,218 @@ export class Game {
   }
 
   _renderLasers(ctx) {
+    const t = this.t;
     for (const l of this.lasers) {
+      const len = Math.hypot(l.x2 - l.x1, l.y2 - l.y1);
+      const nx = (l.x2 - l.x1) / len, ny = (l.y2 - l.y1) / len;
+
+      // Source/end emitter discs (always visible, even when laser off)
+      this._drawEmitter(ctx, l.x1, l.y1, !!l.active);
+      this._drawEmitter(ctx, l.x2, l.y2, !!l.active);
+
       if (!l.active) {
-        // dim guide
+        // Idle: dashed thin guide
         ctx.save();
-        ctx.strokeStyle = "rgba(255,92,107,0.15)";
+        ctx.strokeStyle = "rgba(255,92,107,0.18)";
         ctx.lineWidth = 1;
-        ctx.setLineDash([4, 4]);
+        ctx.setLineDash([5, 6]);
+        ctx.lineDashOffset = -t * 24;
         ctx.beginPath();
         ctx.moveTo(l.x1, l.y1); ctx.lineTo(l.x2, l.y2);
         ctx.stroke();
         ctx.restore();
         continue;
       }
+
+      // Active beam: thick glow + bright core + traveling band
       ctx.save();
-      ctx.strokeStyle = "rgba(255,92,107,0.9)";
+      ctx.globalCompositeOperation = "lighter";
+      // Glow pass
+      ctx.strokeStyle = "rgba(255,92,107,0.55)";
+      ctx.lineWidth = 10;
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(l.x1, l.y1); ctx.lineTo(l.x2, l.y2);
+      ctx.stroke();
+      // Mid pass
+      ctx.strokeStyle = "rgba(255,140,150,0.85)";
       ctx.lineWidth = 4;
-      ctx.shadowColor = "#ff5c6b";
-      ctx.shadowBlur = 16;
       ctx.beginPath();
       ctx.moveTo(l.x1, l.y1); ctx.lineTo(l.x2, l.y2);
       ctx.stroke();
-      ctx.lineWidth = 1.5;
-      ctx.strokeStyle = "rgba(255,255,255,0.9)";
+      // Core
+      ctx.strokeStyle = "rgba(255,255,255,1)";
+      ctx.lineWidth = 1.4;
       ctx.beginPath();
       ctx.moveTo(l.x1, l.y1); ctx.lineTo(l.x2, l.y2);
       ctx.stroke();
+
+      // Traveling pulse: bright dot moving along beam
+      const phase = (t * 380) % (len + 60) - 30;
+      const px = l.x1 + nx * phase, py = l.y1 + ny * phase;
+      const grad = ctx.createRadialGradient(px, py, 0, px, py, 18);
+      grad.addColorStop(0, "rgba(255,255,255,1)");
+      grad.addColorStop(0.4, "rgba(255,180,180,0.7)");
+      grad.addColorStop(1, "rgba(255,90,107,0)");
+      ctx.fillStyle = grad;
+      ctx.fillRect(px - 18, py - 18, 36, 36);
       ctx.restore();
     }
+  }
+
+  _drawEmitter(ctx, x, y, active) {
+    ctx.save();
+    // Base disc
+    ctx.fillStyle = "#251218";
+    ctx.beginPath(); ctx.arc(x, y, 7, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = "#5a2a32";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(x, y, 7, 0, Math.PI * 2); ctx.stroke();
+    // Inner light
+    if (active) {
+      ctx.globalCompositeOperation = "lighter";
+      const grad = ctx.createRadialGradient(x, y, 0, x, y, 14);
+      grad.addColorStop(0, "rgba(255,255,255,1)");
+      grad.addColorStop(0.4, "rgba(255,90,107,0.9)");
+      grad.addColorStop(1, "rgba(255,90,107,0)");
+      ctx.fillStyle = grad;
+      ctx.fillRect(x - 14, y - 14, 28, 28);
+    } else {
+      ctx.fillStyle = "#3a1a22";
+      ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.restore();
   }
 
   _renderPlayer(ctx) {
     const p = this.player;
     if (!p.alive) return;
 
-    // Motion trail ghosts (drawn behind the player at older positions)
-    for (const s of p.trail) {
-      const a = (1 - s.t / 0.12) * 0.35;
+    const cx = p.x + p.w / 2, cy = p.y + p.h / 2;
+
+    // Motion trail ghosts: additive cyan smears behind recent positions
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    for (let i = 0; i < p.trail.length; i++) {
+      const s = p.trail[i];
+      const a = (1 - s.t / 0.12) * 0.35 * (i + 1) / p.trail.length;
       ctx.save();
       ctx.translate(s.x + p.w / 2, s.y + p.h / 2);
       ctx.rotate((s.rot * Math.PI) / 180);
       ctx.globalAlpha = a;
       ctx.fillStyle = "#5cf2ff";
-      ctx.fillRect(-p.w / 2, -p.h / 2, p.w, p.h);
+      roundRect(ctx, -p.w / 2, -p.h / 2, p.w, p.h, 5);
+      ctx.fill();
       ctx.restore();
     }
+    ctx.restore();
 
-    // Squash/stretch on impact: 1.25x along impact axis, 0.8 perp.
+    // Squash/stretch on impact
     let sx = 1, sy = 1;
     if (p.squashT > 0) {
-      const k = p.squashT / 0.13; // 1 -> 0
-      const stretch = 1 + 0.25 * k;
-      const squash = 1 - 0.20 * k;
+      const k = p.squashT / 0.13;
+      const stretch = 1 + 0.30 * k;
+      const squash = 1 - 0.22 * k;
       if (p.squashAxis === "y") { sx = stretch; sy = squash; }
       else                       { sx = squash;  sy = stretch; }
     }
 
-    const cx = p.x + p.w / 2, cy = p.y + p.h / 2;
+    // Outer glow halo (additive)
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    const glowR = 28 + (p.flipFlash > 0 ? p.flipFlash * 60 : 0);
+    const glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, glowR);
+    const flash = p.flipFlash > 0 ? p.flipFlash / 0.18 : 0;
+    glow.addColorStop(0, `rgba(140,248,255,${0.35 + flash * 0.45})`);
+    glow.addColorStop(0.45, `rgba(92,242,255,${0.18 + flash * 0.25})`);
+    glow.addColorStop(1, "rgba(92,242,255,0)");
+    ctx.fillStyle = glow;
+    ctx.fillRect(cx - glowR, cy - glowR, glowR * 2, glowR * 2);
+    ctx.restore();
+
+    // Body (rounded, gradient, with eyes)
     ctx.save();
     ctx.translate(cx, cy);
     ctx.rotate((p.visualRot * Math.PI) / 180);
     ctx.scale(sx, sy);
-    if (p.flipFlash > 0) {
-      const a = p.flipFlash / 0.18;
-      ctx.shadowColor = "rgba(92,242,255," + a + ")";
-      ctx.shadowBlur = 30 * a;
-    } else {
-      ctx.shadowColor = "rgba(92,242,255,0.5)";
-      ctx.shadowBlur = 12;
-    }
-    // Body
-    ctx.fillStyle = "#e6f1ff";
-    ctx.fillRect(-p.w / 2, -p.h / 2, p.w, p.h);
-    // Inner
-    ctx.shadowBlur = 0;
-    ctx.fillStyle = "#5cf2ff";
-    ctx.fillRect(-p.w / 2 + 4, -p.h / 2 + 4, p.w - 8, p.h - 8);
-    // Eye (forward dot — indicates "down" for orientation)
+
+    // Outer shell (white)
+    ctx.fillStyle = "#eaf6ff";
+    roundRect(ctx, -p.w / 2, -p.h / 2, p.w, p.h, 5);
+    ctx.fill();
+    // Inner gradient
+    const body = ctx.createLinearGradient(0, -p.h / 2, 0, p.h / 2);
+    body.addColorStop(0, "#9efbff");
+    body.addColorStop(0.5, "#5cf2ff");
+    body.addColorStop(1, "#1a9fcc");
+    ctx.fillStyle = body;
+    roundRect(ctx, -p.w / 2 + 3, -p.h / 2 + 3, p.w - 6, p.h - 6, 4);
+    ctx.fill();
+    // Top sheen
+    ctx.fillStyle = "rgba(255,255,255,0.32)";
+    roundRect(ctx, -p.w / 2 + 4, -p.h / 2 + 4, p.w - 8, 4, 2);
+    ctx.fill();
+    // Eyes — local +Y is "down" relative to gravity. Place eyes upper-third.
+    const eyeY = -p.h / 2 + 7;
+    const blink = (Math.sin(this.t * 2.0 + p.x * 0.01) > 0.985) ? 0 : 1; // rare blink
     ctx.fillStyle = "#06080f";
-    ctx.fillRect(-3, p.h / 2 - 7, 6, 3);
+    if (blink) {
+      ctx.beginPath(); ctx.arc(-4, eyeY, 1.7, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc( 4, eyeY, 1.7, 0, Math.PI * 2); ctx.fill();
+      // Tiny highlight
+      ctx.fillStyle = "rgba(255,255,255,0.85)";
+      ctx.fillRect(-4.6, eyeY - 1.2, 1, 1);
+      ctx.fillRect( 3.4, eyeY - 1.2, 1, 1);
+    } else {
+      // Closed eye line
+      ctx.fillRect(-5.5, eyeY - 0.5, 3, 1);
+      ctx.fillRect( 2.5, eyeY - 0.5, 3, 1);
+    }
     ctx.restore();
   }
 
   _renderParticles(ctx) {
     ctx.save();
+    ctx.globalCompositeOperation = "lighter";
     for (const pt of this.particles) {
-      const a = 1 - pt.age / pt.life;
-      ctx.globalAlpha = Math.max(0, a);
-      ctx.fillStyle = pt.color;
-      ctx.fillRect(pt.x - 1.5, pt.y - 1.5, 3, 3);
+      const a = Math.max(0, 1 - pt.age / pt.life);
+      const size = 1.6 + a * 2.2;
+      // Soft glow halo
+      const grad = ctx.createRadialGradient(pt.x, pt.y, 0, pt.x, pt.y, size * 3);
+      const m = pt.color.match(/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
+      let rgb = "92,242,255";
+      if (m) rgb = `${parseInt(m[1],16)},${parseInt(m[2],16)},${parseInt(m[3],16)}`;
+      grad.addColorStop(0, `rgba(${rgb},${a})`);
+      grad.addColorStop(0.5, `rgba(${rgb},${a * 0.4})`);
+      grad.addColorStop(1, `rgba(${rgb},0)`);
+      ctx.fillStyle = grad;
+      ctx.fillRect(pt.x - size * 3, pt.y - size * 3, size * 6, size * 6);
+      // Bright core
+      ctx.fillStyle = `rgba(255,255,255,${a * 0.9})`;
+      ctx.fillRect(pt.x - 0.7, pt.y - 0.7, 1.4, 1.4);
     }
-    ctx.globalAlpha = 1;
     ctx.restore();
   }
 
   _renderFlipFx(ctx) {
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
     for (const f of this.flipFx) {
-      const a = 1 - f.t / f.max;
-      const r = 10 + (f.t / f.max) * 80;
-      ctx.save();
-      ctx.strokeStyle = "rgba(92,242,255," + (a * 0.8) + ")";
-      ctx.lineWidth = 2;
+      const k = f.t / f.max;
+      const a = 1 - k;
+      // Two stacked rings expanding at different rates
+      ctx.strokeStyle = `rgba(140,248,255,${a * 0.85})`;
+      ctx.lineWidth = 3;
       ctx.beginPath();
-      ctx.arc(f.x, f.y, r, 0, Math.PI * 2);
+      ctx.arc(f.x, f.y, 10 + k * 90, 0, Math.PI * 2);
       ctx.stroke();
-      ctx.restore();
+      ctx.strokeStyle = `rgba(92,242,255,${a * 0.45})`;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(f.x, f.y, 6 + k * 60, 0, Math.PI * 2);
+      ctx.stroke();
     }
+    ctx.restore();
   }
 
   _renderFlash(ctx) {
@@ -762,176 +1062,403 @@ export class Game {
   }
 
   _renderDeathOverlay(ctx) {
-    const a = Math.min(0.6, this.deathT * 1.6);
+    const W = this.engine.width, H = this.engine.height;
+    const a = Math.min(0.55, this.deathT * 1.4);
     ctx.save();
-    ctx.fillStyle = "rgba(255,92,107," + a + ")";
-    ctx.fillRect(0, 0, this.engine.width, this.engine.height);
+    // Red vignette emanating from edges
+    const grad = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.2, W / 2, H / 2, Math.max(W, H) * 0.85);
+    grad.addColorStop(0, `rgba(255,92,107,${a * 0.2})`);
+    grad.addColorStop(1, `rgba(255,40,60,${a})`);
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, H);
     ctx.restore();
   }
 
   _renderWinOverlay(ctx) {
-    const a = Math.min(0.4, this.winT * 1.2);
+    const W = this.engine.width, H = this.engine.height;
+    const a = Math.min(0.45, this.winT * 1.1);
     ctx.save();
-    ctx.fillStyle = "rgba(255,211,92," + a + ")";
-    ctx.fillRect(0, 0, this.engine.width, this.engine.height);
+    // Gold flash from center
+    const grad = ctx.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, Math.max(W, H) * 0.7);
+    grad.addColorStop(0, `rgba(255,232,140,${a * 1.0})`);
+    grad.addColorStop(0.4, `rgba(255,200,90,${a * 0.5})`);
+    grad.addColorStop(1, `rgba(255,200,90,0)`);
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, H);
+    // Expanding ring
+    ctx.globalCompositeOperation = "lighter";
+    const r = this.winT * 600;
+    ctx.strokeStyle = `rgba(255,232,160,${Math.max(0, 0.8 - this.winT * 1.2)})`;
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.arc(W / 2, H / 2, r, 0, Math.PI * 2);
+    ctx.stroke();
     ctx.restore();
   }
 }
 
 // --- helpers ---
-function drawTile(ctx, tile, x, y, t) {
+
+// Rounded-rect path helper (uses native if available)
+function roundRect(ctx, x, y, w, h, r) {
+  if (ctx.roundRect) {
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, r);
+    return;
+  }
+  const rr = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + rr, y);
+  ctx.arcTo(x + w, y, x + w, y + h, rr);
+  ctx.arcTo(x + w, y + h, x, y + h, rr);
+  ctx.arcTo(x, y + h, x, y, rr);
+  ctx.arcTo(x, y, x + w, y, rr);
+  ctx.closePath();
+}
+
+function drawTile(ctx, lvl, gx, gy, t, game) {
   const s = TILE;
+  const x = gx * s, y = gy * s;
+  const tile = lvl.getTile(gx, gy);
+
   switch (tile) {
     case T.SOLID: {
-      ctx.fillStyle = "#1f2a4a";
+      // Neighbor check for auto-tiling. We treat any solid as a continuous wall.
+      const N = lvl.getTile(gx, gy - 1) === T.SOLID;
+      const S = lvl.getTile(gx, gy + 1) === T.SOLID;
+      const E = lvl.getTile(gx + 1, gy) === T.SOLID;
+      const W = lvl.getTile(gx - 1, gy) === T.SOLID;
+      // Base fill (subtle vertical gradient so walls don't look flat)
+      const grad = ctx.createLinearGradient(x, y, x, y + s);
+      grad.addColorStop(0, "#1c2748");
+      grad.addColorStop(1, "#121a36");
+      ctx.fillStyle = grad;
       ctx.fillRect(x, y, s, s);
-      ctx.fillStyle = "#2a3a66";
-      ctx.fillRect(x, y, s, 3);
-      ctx.fillRect(x, y, 3, s);
-      ctx.fillStyle = "#0e1530";
-      ctx.fillRect(x, y + s - 3, s, 3);
-      ctx.fillRect(x + s - 3, y, 3, s);
+
+      // Edge highlights on EXPOSED edges only (where neighbor is empty)
+      if (!N) { ctx.fillStyle = "#2e3e72"; ctx.fillRect(x, y, s, 3); }
+      if (!W) { ctx.fillStyle = "#2a3a6a"; ctx.fillRect(x, y, 3, s); }
+      if (!S) { ctx.fillStyle = "#0a1126"; ctx.fillRect(x, y + s - 3, s, 3); }
+      if (!E) { ctx.fillStyle = "#0c1430"; ctx.fillRect(x + s - 3, y, 3, s); }
+      // Cross-section seams: only between two SOLIDs, draw a thin darker line
+      if (S) { ctx.fillStyle = "rgba(0,0,0,0.18)"; ctx.fillRect(x, y + s - 1, s, 1); }
+      if (E) { ctx.fillStyle = "rgba(0,0,0,0.18)"; ctx.fillRect(x + s - 1, y, 1, s); }
+      // Subtle dot cluster for texture
+      ctx.fillStyle = "rgba(255,255,255,0.04)";
+      const dx = (gx * 7 + gy * 11) % 16;
+      ctx.fillRect(x + 6 + dx % 12, y + 8 + (dx * 3) % 12, 1, 1);
+      ctx.fillRect(x + 12 + (dx * 5) % 10, y + 18 + (dx * 7) % 10, 1, 1);
       break;
     }
     case T.GLASS: {
-      ctx.fillStyle = "rgba(92,242,255,0.18)";
+      // Crystal-blue glass with diagonal sheen
+      const grad = ctx.createLinearGradient(x, y, x + s, y + s);
+      grad.addColorStop(0, "rgba(92,242,255,0.10)");
+      grad.addColorStop(0.5, "rgba(92,242,255,0.25)");
+      grad.addColorStop(1, "rgba(92,242,255,0.10)");
+      ctx.fillStyle = grad;
       ctx.fillRect(x, y, s, s);
-      ctx.strokeStyle = "rgba(92,242,255,0.7)";
+      ctx.strokeStyle = "rgba(140,248,255,0.85)";
       ctx.lineWidth = 1.5;
-      ctx.strokeRect(x + 0.5, y + 0.5, s - 1, s - 1);
+      ctx.strokeRect(x + 1, y + 1, s - 2, s - 2);
+      ctx.strokeStyle = "rgba(255,255,255,0.45)";
+      ctx.lineWidth = 1.2;
       ctx.beginPath();
-      ctx.moveTo(x + 6, y + 4); ctx.lineTo(x + s - 4, y + s - 6);
+      ctx.moveTo(x + 5, y + 4); ctx.lineTo(x + s - 6, y + s - 8);
+      ctx.moveTo(x + 8, y + 4); ctx.lineTo(x + s - 10, y + s - 8);
       ctx.stroke();
       break;
     }
-    case T.SPIKE_U: drawSpike(ctx, x, y, s, "up"); break;
-    case T.SPIKE_D: drawSpike(ctx, x, y, s, "down"); break;
-    case T.SPIKE_L: drawSpike(ctx, x, y, s, "left"); break;
-    case T.SPIKE_R: drawSpike(ctx, x, y, s, "right"); break;
+    case T.SPIKE_U: drawSpike(ctx, lvl, gx, gy, "up"); break;
+    case T.SPIKE_D: drawSpike(ctx, lvl, gx, gy, "down"); break;
+    case T.SPIKE_L: drawSpike(ctx, lvl, gx, gy, "left"); break;
+    case T.SPIKE_R: drawSpike(ctx, lvl, gx, gy, "right"); break;
     case T.EXIT: {
+      // Portal: rotating rings + soft cyan-gold glow
+      const cx = x + s / 2, cy = y + s / 2;
       const pulse = 0.6 + 0.4 * Math.sin(t * 4);
-      ctx.fillStyle = "rgba(255,211,92,0.15)";
-      ctx.fillRect(x, y, s, s);
-      ctx.strokeStyle = "rgba(255,211,92," + pulse + ")";
+      // Glow halo (additive)
+      ctx.save();
+      ctx.globalCompositeOperation = "lighter";
+      const halo = ctx.createRadialGradient(cx, cy, 0, cx, cy, 28);
+      halo.addColorStop(0, `rgba(255,232,140,${0.5 * pulse})`);
+      halo.addColorStop(0.5, `rgba(255,200,90,${0.25 * pulse})`);
+      halo.addColorStop(1, "rgba(255,200,90,0)");
+      ctx.fillStyle = halo;
+      ctx.fillRect(cx - 28, cy - 28, 56, 56);
+      ctx.restore();
+      // Rotating outer ring
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(t * 1.2);
+      ctx.strokeStyle = `rgba(255,212,100,${0.85 * pulse})`;
       ctx.lineWidth = 2;
-      ctx.strokeRect(x + 3, y + 3, s - 6, s - 6);
-      ctx.fillStyle = "rgba(255,211,92," + (pulse * 0.8) + ")";
-      ctx.fillRect(x + s / 2 - 2, y + 6, 4, s - 12);
-      ctx.fillRect(x + 6, y + s / 2 - 2, s - 12, 4);
+      ctx.beginPath();
+      ctx.arc(0, 0, 11, 0, Math.PI * 1.4); // partial arc
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(0, 0, 11, Math.PI * 1.6, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+      // Inner ring (counter-rotating)
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(-t * 1.8);
+      ctx.strokeStyle = `rgba(255,232,160,${0.95 * pulse})`;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(0, 0, 6, 0, Math.PI * 1.7);
+      ctx.stroke();
+      ctx.restore();
+      // Center dot
+      ctx.fillStyle = `rgba(255,255,200,${pulse})`;
+      ctx.beginPath();
+      ctx.arc(cx, cy, 2.2, 0, Math.PI * 2);
+      ctx.fill();
       break;
     }
     case T.PLATE: {
-      ctx.fillStyle = "#3a2640";
-      ctx.fillRect(x, y + s - 6, s, 6);
-      ctx.fillStyle = "#ff5cf2";
-      ctx.fillRect(x + 4, y + s - 8, s - 8, 4);
+      const i = gy * COLS + gx;
+      const pressed = game && game._activePlates && game._activePlates.has(i);
+      // Base
+      ctx.fillStyle = "#1c1428";
+      ctx.fillRect(x, y + s - 8, s, 8);
+      // Plate top (lower when pressed)
+      const plateY = pressed ? y + s - 5 : y + s - 9;
+      const grad = ctx.createLinearGradient(x, plateY, x, plateY + 5);
+      grad.addColorStop(0, pressed ? "#ff7cff" : "#ff5cf2");
+      grad.addColorStop(1, pressed ? "#a82eb0" : "#c733c8");
+      ctx.fillStyle = grad;
+      roundRect(ctx, x + 3, plateY, s - 6, 5, 1.5);
+      ctx.fill();
+      // Glow when pressed
+      if (pressed) {
+        ctx.save();
+        ctx.globalCompositeOperation = "lighter";
+        const halo = ctx.createRadialGradient(x + s/2, plateY + 2, 0, x + s/2, plateY + 2, 22);
+        halo.addColorStop(0, "rgba(255,140,255,0.6)");
+        halo.addColorStop(1, "rgba(255,92,242,0)");
+        ctx.fillStyle = halo;
+        ctx.fillRect(x - 8, plateY - 12, s + 16, 28);
+        ctx.restore();
+      }
+      // Side rivets
+      ctx.fillStyle = "#5e3a64";
+      ctx.fillRect(x + 1, y + s - 7, 2, 6);
+      ctx.fillRect(x + s - 3, y + s - 7, 2, 6);
       break;
     }
     case T.DOOR: {
-      ctx.fillStyle = "#3a4670";
-      ctx.fillRect(x + 2, y, s - 4, s);
-      ctx.strokeStyle = "#5c6f9e";
-      ctx.lineWidth = 1.5;
-      ctx.strokeRect(x + 2.5, y + 0.5, s - 5, s - 1);
-      for (let i = 0; i < 3; i++) {
-        ctx.fillStyle = "#22305c";
-        ctx.fillRect(x + 6, y + 6 + i * 8, s - 12, 4);
+      // Sliding door driven by game.doorAnim (0=closed, 1=open)
+      const k = game ? Math.max(0, Math.min(1, game.doorAnim)) : 0;
+      const slide = k * (s / 2 - 2); // each half slides outward by `slide`
+      // Frame
+      ctx.fillStyle = "#0c1024";
+      ctx.fillRect(x, y, s, s);
+      ctx.strokeStyle = "#2a3458";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x + 0.5, y + 0.5, s - 1, s - 1);
+      // Two halves (top & bottom) slide apart
+      const halfH = (s / 2) - slide;
+      if (halfH > 0) {
+        const grad1 = ctx.createLinearGradient(x, y, x, y + halfH);
+        grad1.addColorStop(0, "#46568a");
+        grad1.addColorStop(1, "#2c3a64");
+        ctx.fillStyle = grad1;
+        ctx.fillRect(x + 2, y, s - 4, halfH);
+        const grad2 = ctx.createLinearGradient(x, y + s - halfH, x, y + s);
+        grad2.addColorStop(0, "#2c3a64");
+        grad2.addColorStop(1, "#46568a");
+        ctx.fillStyle = grad2;
+        ctx.fillRect(x + 2, y + s - halfH, s - 4, halfH);
+        // Stripes
+        ctx.fillStyle = "#1a2240";
+        for (let i = 0; i < 2; i++) {
+          if (halfH > 6) ctx.fillRect(x + 6, y + 4 + i * 8, s - 12, 3);
+          if (halfH > 6) ctx.fillRect(x + 6, y + s - halfH + (halfH - 7) - i * 8, s - 12, 3);
+        }
       }
+      // Status light along the seam
+      const seamY = y + s / 2;
+      ctx.fillStyle = `rgba(${k > 0.5 ? "92,242,140" : "255,150,90"},0.9)`;
+      ctx.fillRect(x + s / 2 - 2, seamY - 0.5, 4, 1);
       break;
     }
     case T.CONVEYOR_R:
     case T.CONVEYOR_L: {
-      ctx.fillStyle = "#252b3a";
+      // Belt body
+      const grad = ctx.createLinearGradient(x, y, x, y + s);
+      grad.addColorStop(0, "#2a3247");
+      grad.addColorStop(0.5, "#1d2434");
+      grad.addColorStop(1, "#2a3247");
+      ctx.fillStyle = grad;
       ctx.fillRect(x, y, s, s);
-      ctx.fillStyle = "#3a4660";
+      // Roller bumps top/bottom
+      ctx.fillStyle = "#3e4a68";
       ctx.fillRect(x, y, s, 5);
       ctx.fillRect(x, y + s - 5, s, 5);
-      // Animated arrows
+      ctx.fillStyle = "#1a2030";
+      ctx.fillRect(x, y + 4, s, 1);
+      ctx.fillRect(x, y + s - 5, s, 1);
+      // Animated cyan chevrons
       const dir = tile === T.CONVEYOR_R ? 1 : -1;
-      const off = (t * 60 * dir) % 16;
+      const off = (t * 90 * dir) % 16;
       ctx.fillStyle = "#5cf2ff";
-      for (let i = -16; i < s; i += 16) {
+      ctx.shadowColor = "#5cf2ff";
+      ctx.shadowBlur = 4;
+      for (let i = -16; i < s; i += 14) {
         const xx = x + ((i + off + 32) % 32);
         ctx.beginPath();
         if (dir > 0) {
-          ctx.moveTo(xx, y + s / 2 - 4);
-          ctx.lineTo(xx + 6, y + s / 2);
-          ctx.lineTo(xx, y + s / 2 + 4);
+          ctx.moveTo(xx, y + s / 2 - 5);
+          ctx.lineTo(xx + 7, y + s / 2);
+          ctx.lineTo(xx, y + s / 2 + 5);
+          ctx.lineTo(xx + 2, y + s / 2);
         } else {
-          ctx.moveTo(xx + 6, y + s / 2 - 4);
+          ctx.moveTo(xx + 7, y + s / 2 - 5);
           ctx.lineTo(xx, y + s / 2);
-          ctx.lineTo(xx + 6, y + s / 2 + 4);
+          ctx.lineTo(xx + 7, y + s / 2 + 5);
+          ctx.lineTo(xx + 5, y + s / 2);
         }
         ctx.closePath();
         ctx.fill();
       }
+      ctx.shadowBlur = 0;
       break;
     }
     case T.BOUNCE: {
-      ctx.fillStyle = "#1f2a4a";
+      // Spring-pad: dark base + glowing cyan top bar with springs visible
+      ctx.fillStyle = "#10162e";
       ctx.fillRect(x, y, s, s);
-      ctx.fillStyle = "#5cf2ff";
-      ctx.fillRect(x + 2, y + 2, s - 4, 8);
-      ctx.fillStyle = "#84f9ff";
-      ctx.fillRect(x + 2, y + 2, s - 4, 3);
+      ctx.strokeStyle = "#2a3458";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x + 0.5, y + 0.5, s - 1, s - 1);
+      // Springs (zigzags)
+      ctx.strokeStyle = "#6e7da0";
+      ctx.lineWidth = 1.3;
+      for (let i = 0; i < 3; i++) {
+        const sx = x + 6 + i * 8;
+        ctx.beginPath();
+        ctx.moveTo(sx, y + s - 4);
+        ctx.lineTo(sx + 4, y + s - 8);
+        ctx.lineTo(sx, y + s - 12);
+        ctx.lineTo(sx + 4, y + s - 16);
+        ctx.stroke();
+      }
+      // Top bar (animated pulse)
+      const bp = 0.7 + 0.3 * Math.sin(t * 6);
+      const grad = ctx.createLinearGradient(x, y, x, y + 12);
+      grad.addColorStop(0, `rgba(180,250,255,${bp})`);
+      grad.addColorStop(1, `rgba(92,242,255,${bp})`);
+      ctx.fillStyle = grad;
+      roundRect(ctx, x + 2, y + 2, s - 4, 9, 2);
+      ctx.fill();
+      // Bar glow
+      ctx.save();
+      ctx.globalCompositeOperation = "lighter";
+      const halo = ctx.createLinearGradient(x, y, x, y + 16);
+      halo.addColorStop(0, "rgba(92,242,255,0.5)");
+      halo.addColorStop(1, "rgba(92,242,255,0)");
+      ctx.fillStyle = halo;
+      ctx.fillRect(x, y, s, 16);
+      ctx.restore();
       break;
     }
     case T.STICKY: {
-      ctx.fillStyle = "#3a2a1f";
+      // Honey/amber dotted surface
+      const grad = ctx.createLinearGradient(x, y, x, y + s);
+      grad.addColorStop(0, "#5a3a1c");
+      grad.addColorStop(1, "#3a2410");
+      ctx.fillStyle = grad;
       ctx.fillRect(x, y, s, s);
-      ctx.fillStyle = "#9b6a3a";
+      ctx.fillStyle = "#cf9244";
       for (let i = 0; i < 4; i++) {
-        ctx.fillRect(x + 4 + i * 6, y + 4, 4, 4);
-        ctx.fillRect(x + 4 + i * 6, y + 16, 4, 4);
+        ctx.beginPath();
+        ctx.arc(x + 6 + i * 6, y + 8, 2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(x + 9 + i * 6, y + 20, 2, 0, Math.PI * 2);
+        ctx.fill();
       }
       break;
     }
     case T.ICE: {
-      ctx.fillStyle = "#13314a";
+      // Frosted blue with crystal lines
+      const grad = ctx.createLinearGradient(x, y, x, y + s);
+      grad.addColorStop(0, "#1d4a72");
+      grad.addColorStop(1, "#0e2640");
+      ctx.fillStyle = grad;
       ctx.fillRect(x, y, s, s);
       ctx.fillStyle = "rgba(255,255,255,0.18)";
-      ctx.fillRect(x, y, s, 4);
+      ctx.fillRect(x, y, s, 3);
+      ctx.fillStyle = "rgba(255,255,255,0.08)";
       ctx.fillRect(x, y + s - 2, s, 2);
-      ctx.strokeStyle = "rgba(255,255,255,0.25)";
+      ctx.strokeStyle = "rgba(180,230,255,0.45)";
+      ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.moveTo(x + 4, y + 8); ctx.lineTo(x + 12, y + 18);
-      ctx.moveTo(x + 18, y + 6); ctx.lineTo(x + 26, y + 14);
+      ctx.moveTo(x + 4,  y + 6);  ctx.lineTo(x + 12, y + 18);
+      ctx.moveTo(x + 18, y + 4);  ctx.lineTo(x + 26, y + 14);
+      ctx.moveTo(x + 6,  y + 22); ctx.lineTo(x + 14, y + 28);
       ctx.stroke();
+      // Sparkles
+      const sp = (Math.sin(t * 3 + gx + gy) + 1) * 0.5;
+      ctx.fillStyle = `rgba(255,255,255,${sp * 0.5})`;
+      ctx.fillRect(x + 22, y + 22, 1.5, 1.5);
+      ctx.fillRect(x + 8,  y + 12, 1, 1);
       break;
     }
   }
 }
 
-function drawSpike(ctx, x, y, s, dir) {
-  ctx.fillStyle = "#cdd9f0";
-  ctx.strokeStyle = "#7c8aaa";
-  ctx.lineWidth = 1;
+function drawSpike(ctx, lvl, gx, gy, dir) {
+  const s = TILE;
+  const x = gx * s, y = gy * s;
+  // Base pad behind spikes (helps spikes feel "mounted")
+  ctx.fillStyle = "#13192d";
+  if (dir === "up") ctx.fillRect(x, y + s - 6, s, 6);
+  else if (dir === "down") ctx.fillRect(x, y, s, 6);
+  else if (dir === "left") ctx.fillRect(x + s - 6, y, 6, s);
+  else if (dir === "right") ctx.fillRect(x, y, 6, s);
+
   const N = 4;
   for (let i = 0; i < N; i++) {
-    ctx.beginPath();
+    let xs, ys, tipX, tipY, baseAX, baseAY, baseBX, baseBY;
     if (dir === "up") {
-      const xs = x + (i * s) / N;
-      ctx.moveTo(xs, y + s);
-      ctx.lineTo(xs + s / N / 2, y + 4);
-      ctx.lineTo(xs + s / N, y + s);
+      xs = x + (i * s) / N;
+      baseAX = xs;            baseAY = y + s;
+      baseBX = xs + s / N;    baseBY = y + s;
+      tipX  = xs + s / N / 2; tipY  = y + 3;
     } else if (dir === "down") {
-      const xs = x + (i * s) / N;
-      ctx.moveTo(xs, y);
-      ctx.lineTo(xs + s / N / 2, y + s - 4);
-      ctx.lineTo(xs + s / N, y);
+      xs = x + (i * s) / N;
+      baseAX = xs;            baseAY = y;
+      baseBX = xs + s / N;    baseBY = y;
+      tipX  = xs + s / N / 2; tipY  = y + s - 3;
     } else if (dir === "left") {
-      const ys = y + (i * s) / N;
-      ctx.moveTo(x + s, ys);
-      ctx.lineTo(x + 4, ys + s / N / 2);
-      ctx.lineTo(x + s, ys + s / N);
-    } else if (dir === "right") {
-      const ys = y + (i * s) / N;
-      ctx.moveTo(x, ys);
-      ctx.lineTo(x + s - 4, ys + s / N / 2);
-      ctx.lineTo(x, ys + s / N);
+      ys = y + (i * s) / N;
+      baseAX = x + s;         baseAY = ys;
+      baseBX = x + s;         baseBY = ys + s / N;
+      tipX  = x + 3;          tipY  = ys + s / N / 2;
+    } else {
+      ys = y + (i * s) / N;
+      baseAX = x;             baseAY = ys;
+      baseBX = x;             baseBY = ys + s / N;
+      tipX  = x + s - 3;      tipY  = ys + s / N / 2;
     }
+    // Gradient fill: bright tip, dim base
+    const grad = ctx.createLinearGradient(baseAX, baseAY, tipX, tipY);
+    grad.addColorStop(0, "#7c8aaa");
+    grad.addColorStop(0.6, "#cdd9f0");
+    grad.addColorStop(1, "#ffffff");
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.moveTo(baseAX, baseAY);
+    ctx.lineTo(tipX, tipY);
+    ctx.lineTo(baseBX, baseBY);
     ctx.closePath();
     ctx.fill();
+    // Edge stroke
+    ctx.strokeStyle = "rgba(0,0,0,0.55)";
+    ctx.lineWidth = 0.8;
     ctx.stroke();
   }
 }
