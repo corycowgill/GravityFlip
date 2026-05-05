@@ -137,6 +137,22 @@ export class Game {
     this.flashT = 0.18;
   }
 
+  // Pooled particle spawn — reuses dead slots in this.particles instead of
+  // allocating new objects each frame. Caps active particle count.
+  _spawnParticle(x, y, vx, vy, life, color) {
+    // Reuse a dead slot if any
+    for (let i = 0; i < this.particles.length; i++) {
+      const p = this.particles[i];
+      if (p.age >= p.life) {
+        p.x = x; p.y = y; p.vx = vx; p.vy = vy;
+        p.life = life; p.age = 0; p.color = color;
+        return;
+      }
+    }
+    if (this.particles.length >= 240) return; // hard cap to keep mobile happy
+    this.particles.push({ x, y, vx, vy, life, age: 0, color });
+  }
+
   _spawnFlipFx() {
     const cx = this.player.x + this.player.w / 2;
     const cy = this.player.y + this.player.h / 2;
@@ -144,12 +160,9 @@ export class Game {
     for (let i = 0; i < 14; i++) {
       const a = Math.random() * Math.PI * 2;
       const sp = 80 + Math.random() * 200;
-      this.particles.push({
-        x: cx, y: cy,
-        vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
-        life: 0.35 + Math.random() * 0.25, age: 0,
-        color: Math.random() < 0.5 ? "#5cf2ff" : "#ff5cf2",
-      });
+      this._spawnParticle(cx, cy, Math.cos(a) * sp, Math.sin(a) * sp,
+                          0.35 + Math.random() * 0.25,
+                          Math.random() < 0.5 ? "#5cf2ff" : "#ff5cf2");
     }
   }
 
@@ -159,19 +172,15 @@ export class Game {
     this.audio.die();
     this.state = "dead";
     this.deathT = 0;
-    // Burst
     const cx = this.player.x + this.player.w / 2;
     const cy = this.player.y + this.player.h / 2;
     for (let i = 0; i < 30; i++) {
       const a = Math.random() * Math.PI * 2;
       const sp = 80 + Math.random() * 240;
-      this.particles.push({
-        x: cx, y: cy, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
-        life: 0.5 + Math.random() * 0.4, age: 0, color: "#ff5c6b",
-      });
+      this._spawnParticle(cx, cy, Math.cos(a) * sp, Math.sin(a) * sp,
+                          0.5 + Math.random() * 0.4, "#ff5c6b");
     }
   }
-
   _onWin() {
     if (this.state !== "play") return;
     this.state = "win";
@@ -260,15 +269,24 @@ export class Game {
       this.winT += dtRaw;
     }
 
-    // Particles
+    // Particles — pooled. Dead slots (age >= life) stay in place so
+    // _spawnParticle can reuse them without allocating.
     for (const p of this.particles) {
+      if (p.age >= p.life) continue;
       p.age += dt;
       p.x += p.vx * dt;
       p.y += p.vy * dt;
       p.vx *= 0.96;
       p.vy *= 0.96;
     }
-    this.particles = this.particles.filter(p => p.age < p.life);
+    // Trim a contiguous tail of dead slots once the pool grows large to
+    // bound memory; we never shrink mid-array (would invalidate slots).
+    if (this.particles.length > 120) {
+      while (this.particles.length > 80) {
+        const last = this.particles[this.particles.length - 1];
+        if (last.age >= last.life) this.particles.pop(); else break;
+      }
+    }
 
     for (const f of this.flipFx) f.t += dt;
     this.flipFx = this.flipFx.filter(f => f.t < f.max);
@@ -277,35 +295,37 @@ export class Game {
   _drainPlayerEvents() {
     const evts = this.player.events;
     if (evts.length === 0) return;
+    const haptic = (pattern) => this.engine.input.vibrate(pattern);
     for (const e of evts) {
       if (e.type === "land") {
         this.audio.land();
-        // Stronger impact = more shake. Cap to avoid disorientation.
         const mag = Math.min(8, (e.speed - 380) / 60);
         this._shake(mag, 0.18);
+        if (mag > 4) haptic(15);
       } else if (e.type === "bounce") {
         this.audio.bounce();
         this._shake(3, 0.12);
+        haptic(20);
       } else if (e.type === "glass") {
-        // Shatter SFX and particles
         this.audio.click();
         this._shake(4, 0.15);
+        haptic(25);
         const px = e.gx * TILE + TILE / 2;
         const py = e.gy * TILE + TILE / 2;
         for (let i = 0; i < 16; i++) {
           const a = Math.random() * Math.PI * 2;
           const sp = 100 + Math.random() * 220;
-          this.particles.push({
-            x: px, y: py, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
-            life: 0.4 + Math.random() * 0.3, age: 0, color: "#5cf2ff",
-          });
+          this._spawnParticle(px, py, Math.cos(a) * sp, Math.sin(a) * sp,
+                              0.4 + Math.random() * 0.3, "#5cf2ff");
         }
       } else if (e.type === "die") {
         this._shake(7, 0.35);
+        haptic([60, 30, 60]);
       } else if (e.type === "flip") {
         this.audio.flip();
         this._spawnFlipFx();
         this._updateBgRotTarget();
+        haptic(8);
       }
     }
     evts.length = 0;
@@ -1012,6 +1032,7 @@ export class Game {
     ctx.save();
     ctx.globalCompositeOperation = "lighter";
     for (const pt of this.particles) {
+      if (pt.age >= pt.life) continue; // dead slot in pool
       const a = Math.max(0, 1 - pt.age / pt.life);
       const size = 1.6 + a * 2.2;
       // Soft glow halo
@@ -1071,6 +1092,35 @@ export class Game {
     grad.addColorStop(1, `rgba(255,40,60,${a})`);
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+  }
+
+  // Dev overlay: toggle with backtick. Useful for tuning physics + watching
+  // ticks-per-second to verify the fixed-timestep loop is healthy.
+  renderDebug(ctx, engine) {
+    const p = this.player;
+    const W = engine.width;
+    ctx.save();
+    ctx.fillStyle = "rgba(0,0,0,0.55)";
+    ctx.fillRect(W - 232, 8, 224, 152);
+    ctx.fillStyle = "#9efbff";
+    ctx.font = "11px ui-monospace, SFMono-Regular, Menlo, monospace";
+    ctx.textBaseline = "top";
+    const lines = [
+      `FPS  ${engine.fps.toFixed(1)}   TPS ${engine.tps.toFixed(1)}`,
+      `tick ${engine.ticks}   frame ${engine.lastFrameMs.toFixed(2)}ms`,
+      `state ${this.state}   slow ${this.slow ? "ON" : "off"}`,
+      `pos  ${p.x.toFixed(1)}, ${p.y.toFixed(1)}`,
+      `vel  ${p.vx.toFixed(1)}, ${p.vy.toFixed(1)}  spd ${Math.hypot(p.vx,p.vy).toFixed(0)}`,
+      `grav ${p.gravity.x},${p.gravity.y}  eff ${(p.effGravity||p.gravity).x},${(p.effGravity||p.gravity).y}`,
+      `gnd  ${p.grounded}   alive ${p.alive}   cd ${p.flipCooldown.toFixed(2)}`,
+      `buf  ${p.bufferDir || "-"}  bufT ${p.bufferT.toFixed(2)}`,
+      `ptcl ${this.particles.length}  shake ${this.shakeT.toFixed(2)}`,
+      `door ${this.doorAnim.toFixed(2)} -> ${this.doorAnimTarget.toFixed(0)}`,
+    ];
+    for (let i = 0; i < lines.length; i++) {
+      ctx.fillText(lines[i], W - 224, 14 + i * 14);
+    }
     ctx.restore();
   }
 

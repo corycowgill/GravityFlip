@@ -15,16 +15,21 @@ const ui = new UI({ engine, game, audio, save, levels: LEVELS });
 
 ui.showMenu();
 
-engine.start((dt) => {
-  game.update(dt);
-  game.render(engine.ctx);
+engine.start({
+  update: (dt) => game.update(dt),
+  render: (alpha) => {
+    game.render(engine.ctx, alpha);
+    if (engine.debug) game.renderDebug(engine.ctx, engine);
+  },
 });
 
-// Pause when tab hidden
+// Pause when tab hidden / window loses focus
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) engine.pause();
   else engine.resume();
 });
+window.addEventListener("blur", () => engine.pause());
+window.addEventListener("focus", () => engine.resume());
 
 // Expose for debugging
 window.__gf = { engine, game, ui, save };

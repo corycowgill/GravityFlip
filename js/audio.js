@@ -1,9 +1,18 @@
 // Web Audio: synthesized SFX (no asset files). Lazy-init on first user gesture.
+//
+// Voice limiter: at most MAX_VOICES simultaneous oscillators. When over the
+// cap, we kill the oldest voice. This prevents the rapid-flip "noise blast"
+// where a chained flip stacks 6+ overlapping square waves and clips.
+const MAX_VOICES = 8;
+
 export class AudioFx {
   constructor() {
     this.ctx = null;
     this.master = null;
     this.muted = false;
+    this.voices = []; // [{node, gain, endAt}]
+    // Per-channel cooldowns: stops repeated identical SFX from machine-gunning.
+    this._lastPlayedAt = new Map();
   }
 
   _ensure() {
@@ -26,12 +35,35 @@ export class AudioFx {
     if (this.master) this.master.gain.value = v ? 0 : 0.5;
   }
 
-  // Solid "thunk" on flip
+  // Returns true if the sound should be skipped due to per-channel cooldown.
+  _onCooldown(channel, ms) {
+    const now = (this.ctx ? this.ctx.currentTime : 0) * 1000;
+    const last = this._lastPlayedAt.get(channel) || 0;
+    if (now - last < ms) return true;
+    this._lastPlayedAt.set(channel, now);
+    return false;
+  }
+
+  // Cull dead voices and ensure we don't exceed MAX_VOICES. If we do, kill the
+  // oldest immediately so a new sound can play.
+  _reapVoices() {
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    this.voices = this.voices.filter(v => v.endAt > now);
+    while (this.voices.length >= MAX_VOICES) {
+      const v = this.voices.shift();
+      try { v.gain.gain.cancelScheduledValues(now); v.gain.gain.setValueAtTime(0.0001, now); } catch {}
+    }
+  }
+
+  // Per-channel cooldowns (ms) prevent SFX flooding on rapid events.
   flip() {
+    if (this._onCooldown("flip", 30)) return;
     this._tone({ freq: 90, type: "square", dur: 0.07, gain: 0.5, decay: 0.9 });
     this._tone({ freq: 180, type: "sine", dur: 0.12, gain: 0.25, decay: 0.85 });
   }
   land() {
+    if (this._onCooldown("land", 60)) return;
     this._tone({ freq: 60, type: "square", dur: 0.06, gain: 0.35, decay: 0.6 });
   }
   die() {
@@ -45,12 +77,15 @@ export class AudioFx {
     });
   }
   click() {
+    if (this._onCooldown("click", 40)) return;
     this._tone({ freq: 720, type: "square", dur: 0.04, gain: 0.18, decay: 0.5 });
   }
   laser() {
+    if (this._onCooldown("laser", 80)) return;
     this._tone({ freq: 1200, type: "sawtooth", dur: 0.25, gain: 0.12, decay: 0.5 });
   }
   bounce() {
+    if (this._onCooldown("bounce", 60)) return;
     this._tone({ freq: 320, type: "sine", dur: 0.1, gain: 0.3, decay: 0.6, slideTo: 720 });
   }
   pickup() {
@@ -60,6 +95,7 @@ export class AudioFx {
   _tone({ freq = 440, type = "sine", dur = 0.1, gain = 0.3, decay = 0.6, when = 0, slideTo = null }) {
     this._ensure();
     if (!this.ctx || this.muted) return;
+    this._reapVoices();
     const ctx = this.ctx;
     const t = when || ctx.currentTime;
     const osc = ctx.createOscillator();
@@ -71,7 +107,9 @@ export class AudioFx {
     g.gain.exponentialRampToValueAtTime(0.0001, t + dur * (1 + decay));
     osc.connect(g).connect(this.master);
     osc.start(t);
-    osc.stop(t + dur * (1 + decay) + 0.02);
+    const endAt = t + dur * (1 + decay) + 0.02;
+    osc.stop(endAt);
+    this.voices.push({ node: osc, gain: g, endAt });
   }
 
   _noiseBurst(dur, gain) {
