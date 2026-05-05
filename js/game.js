@@ -139,18 +139,24 @@ export class Game {
 
   // Pooled particle spawn — reuses dead slots in this.particles instead of
   // allocating new objects each frame. Caps active particle count.
-  _spawnParticle(x, y, vx, vy, life, color) {
-    // Reuse a dead slot if any
+  // kind: "dot" (default) | "shard" — shards render as rotating rounded rects
+  // and accept an optional `gy` for simulated gravity (used for confetti).
+  _spawnParticle(x, y, vx, vy, life, color, kind = "dot", opts = null) {
+    const rot = opts && opts.rot != null ? opts.rot : Math.random() * Math.PI * 2;
+    const vrot = opts && opts.vrot != null ? opts.vrot : (Math.random() - 0.5) * 8;
+    const gy = opts && opts.gy != null ? opts.gy : 0;
+    const size = opts && opts.size != null ? opts.size : (kind === "shard" ? 7 : 0);
     for (let i = 0; i < this.particles.length; i++) {
       const p = this.particles[i];
       if (p.age >= p.life) {
         p.x = x; p.y = y; p.vx = vx; p.vy = vy;
         p.life = life; p.age = 0; p.color = color;
+        p.kind = kind; p.rot = rot; p.vrot = vrot; p.gy = gy; p.size = size;
         return;
       }
     }
-    if (this.particles.length >= 240) return; // hard cap to keep mobile happy
-    this.particles.push({ x, y, vx, vy, life, age: 0, color });
+    if (this.particles.length >= 240) return;
+    this.particles.push({ x, y, vx, vy, life, age: 0, color, kind, rot, vrot, gy, size });
   }
 
   _spawnFlipFx() {
@@ -174,9 +180,18 @@ export class Game {
     this.deathT = 0;
     const cx = this.player.x + this.player.w / 2;
     const cy = this.player.y + this.player.h / 2;
-    for (let i = 0; i < 30; i++) {
+    // Big chunky shards: the player visibly fragments outward.
+    for (let i = 0; i < 6; i++) {
+      const a = (i / 6) * Math.PI * 2 + Math.random() * 0.4;
+      const sp = 220 + Math.random() * 220;
+      this._spawnParticle(cx, cy, Math.cos(a) * sp, Math.sin(a) * sp,
+                          0.7 + Math.random() * 0.3, "#9efbff", "shard",
+                          { vrot: (Math.random() - 0.5) * 16, size: 9 });
+    }
+    // Red dust burst on top
+    for (let i = 0; i < 24; i++) {
       const a = Math.random() * Math.PI * 2;
-      const sp = 80 + Math.random() * 240;
+      const sp = 80 + Math.random() * 260;
       this._spawnParticle(cx, cy, Math.cos(a) * sp, Math.sin(a) * sp,
                           0.5 + Math.random() * 0.4, "#ff5c6b");
     }
@@ -190,6 +205,26 @@ export class Game {
     this.save.setCleared(this.def.id);
     this.save.setBest(this.def.id, this.elapsed);
     if (this.onWin) this.onWin({ id: this.def.id, time: this.elapsed });
+    // Confetti rain from above + celebratory burst from the exit
+    const colors = ["#ff5c6b", "#ffd35c", "#5cf2ff", "#a3ff5c", "#ff5cf2", "#ffffff"];
+    for (let i = 0; i < 60; i++) {
+      const x = Math.random() * COLS * TILE;
+      const y = -10 - Math.random() * 80;
+      const vx = (Math.random() - 0.5) * 90;
+      const vy = 60 + Math.random() * 90;
+      this._spawnParticle(x, y, vx, vy, 1.8 + Math.random() * 1.2,
+                          colors[Math.floor(Math.random() * colors.length)],
+                          "shard", { vrot: (Math.random() - 0.5) * 12, size: 6, gy: 240 });
+    }
+    // Burst at exit center
+    const cx = this.player.x + this.player.w / 2;
+    const cy = this.player.y + this.player.h / 2;
+    for (let i = 0; i < 24; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const sp = 120 + Math.random() * 220;
+      this._spawnParticle(cx, cy, Math.cos(a) * sp, Math.sin(a) * sp,
+                          0.6 + Math.random() * 0.4, "#ffd884");
+    }
   }
 
   update(dtRaw) {
@@ -276,8 +311,17 @@ export class Game {
       p.age += dt;
       p.x += p.vx * dt;
       p.y += p.vy * dt;
-      p.vx *= 0.96;
-      p.vy *= 0.96;
+      // Per-particle gravity (used by confetti). 0 for normal sparks.
+      if (p.gy) p.vy += p.gy * dt;
+      // Drag: shards drag less so they fly farther
+      if (p.kind === "shard") {
+        p.vx *= 0.985;
+        p.vy *= 0.985;
+        p.rot += (p.vrot || 0) * dt;
+      } else {
+        p.vx *= 0.96;
+        p.vy *= 0.96;
+      }
     }
     // Trim a contiguous tail of dead slots once the pool grows large to
     // bound memory; we never shrink mid-array (would invalidate slots).
@@ -974,14 +1018,25 @@ export class Game {
       else                       { sx = squash;  sy = stretch; }
     }
 
-    // Outer glow halo (additive)
+    // Player as a light source: a wide soft cyan glow that "lights up"
+    // nearby tiles via additive blending. Render BEFORE the player body so
+    // it shines through onto adjacent walls/floor.
     ctx.save();
     ctx.globalCompositeOperation = "lighter";
-    const glowR = 28 + (p.flipFlash > 0 ? p.flipFlash * 60 : 0);
-    const glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, glowR);
     const flash = p.flipFlash > 0 ? p.flipFlash / 0.18 : 0;
-    glow.addColorStop(0, `rgba(140,248,255,${0.35 + flash * 0.45})`);
-    glow.addColorStop(0.45, `rgba(92,242,255,${0.18 + flash * 0.25})`);
+    // Wide ambient light radius
+    const lightR = 96 + flash * 30;
+    const light = ctx.createRadialGradient(cx, cy, 0, cx, cy, lightR);
+    light.addColorStop(0, `rgba(140,248,255,${0.18 + flash * 0.20})`);
+    light.addColorStop(0.35, `rgba(92,242,255,${0.10 + flash * 0.12})`);
+    light.addColorStop(1, "rgba(92,242,255,0)");
+    ctx.fillStyle = light;
+    ctx.fillRect(cx - lightR, cy - lightR, lightR * 2, lightR * 2);
+    // Tighter inner glow halo
+    const glowR = 28 + flash * 60;
+    const glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, glowR);
+    glow.addColorStop(0, `rgba(180,250,255,${0.45 + flash * 0.4})`);
+    glow.addColorStop(0.45, `rgba(92,242,255,${0.22 + flash * 0.22})`);
     glow.addColorStop(1, "rgba(92,242,255,0)");
     ctx.fillStyle = glow;
     ctx.fillRect(cx - glowR, cy - glowR, glowR * 2, glowR * 2);
@@ -1029,27 +1084,45 @@ export class Game {
   }
 
   _renderParticles(ctx) {
+    // Pass 1: dot particles use additive blending for glow.
     ctx.save();
     ctx.globalCompositeOperation = "lighter";
     for (const pt of this.particles) {
-      if (pt.age >= pt.life) continue; // dead slot in pool
+      if (pt.age >= pt.life) continue;
+      if (pt.kind === "shard") continue;
       const a = Math.max(0, 1 - pt.age / pt.life);
       const size = 1.6 + a * 2.2;
-      // Soft glow halo
-      const grad = ctx.createRadialGradient(pt.x, pt.y, 0, pt.x, pt.y, size * 3);
       const m = pt.color.match(/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
       let rgb = "92,242,255";
       if (m) rgb = `${parseInt(m[1],16)},${parseInt(m[2],16)},${parseInt(m[3],16)}`;
+      const grad = ctx.createRadialGradient(pt.x, pt.y, 0, pt.x, pt.y, size * 3);
       grad.addColorStop(0, `rgba(${rgb},${a})`);
       grad.addColorStop(0.5, `rgba(${rgb},${a * 0.4})`);
       grad.addColorStop(1, `rgba(${rgb},0)`);
       ctx.fillStyle = grad;
       ctx.fillRect(pt.x - size * 3, pt.y - size * 3, size * 6, size * 6);
-      // Bright core
       ctx.fillStyle = `rgba(255,255,255,${a * 0.9})`;
       ctx.fillRect(pt.x - 0.7, pt.y - 0.7, 1.4, 1.4);
     }
     ctx.restore();
+    // Pass 2: shard particles (non-additive, rotating colored rectangles).
+    for (const pt of this.particles) {
+      if (pt.age >= pt.life) continue;
+      if (pt.kind !== "shard") continue;
+      const a = Math.max(0, 1 - pt.age / pt.life);
+      const sz = (pt.size || 7) * (0.7 + 0.3 * a);
+      ctx.save();
+      ctx.translate(pt.x, pt.y);
+      ctx.rotate(pt.rot || 0);
+      ctx.globalAlpha = a;
+      ctx.fillStyle = pt.color;
+      ctx.fillRect(-sz / 2, -sz / 2, sz, sz * 0.55);
+      // Highlight
+      ctx.fillStyle = "rgba(255,255,255,0.4)";
+      ctx.fillRect(-sz / 2, -sz / 2, sz, 1);
+      ctx.restore();
+    }
+    ctx.globalAlpha = 1;
   }
 
   _renderFlipFx(ctx) {

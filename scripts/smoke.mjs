@@ -251,6 +251,39 @@ test("Active laser kills player", async () => {
   assert(hit, "laser should overlap player position");
 });
 
+// 10b. Spawn safety: every level's spawn cell, plus every cell directly
+// below it down to the first solid floor, must be free of spikes and
+// always-on lasers. Otherwise the player dies before they can flip.
+test("Every level's spawn-fall column is safe", () => {
+  for (const def of LEVELS) {
+    const lvl = new Level(def);
+    const sx = Math.floor(lvl.spawn.x / TILE);
+    const sy = Math.floor(lvl.spawn.y / TILE);
+    for (let y = sy + 1; y < 17; y++) {
+      const t = lvl.getTile(sx, y);
+      if (t === 2 || t === 3 || t === 4 || t === 5) {
+        throw new Error(`${def.id}: spawn (${sx},${sy}) falls onto spike at (${sx},${y})`);
+      }
+      if (t === 1 || t === 8 || t === 14 || t === 15 || t === 9 || t === 10 || t === 11 || t === 12) break; // solid
+    }
+    // Also check: spawn isn't sitting under an always-on laser column
+    for (const l of (def.lasers || [])) {
+      const duty = l.duty != null ? l.duty : 0.5;
+      if (duty < 0.9) continue;
+      // If laser is vertical and passes through spawn x, and crosses spawn y, fail.
+      const vertical = Math.abs(l.x2 - l.x1) < 1;
+      if (!vertical) continue;
+      const lx = Math.floor(l.x1 / TILE);
+      if (lx !== sx) continue;
+      const lyTop = Math.min(l.y1, l.y2) / TILE;
+      const lyBot = Math.max(l.y1, l.y2) / TILE;
+      if (sy >= lyTop && sy <= lyBot) {
+        throw new Error(`${def.id}: spawn (${sx},${sy}) is in always-on laser column`);
+      }
+    }
+  }
+});
+
 // 11. Multi-zone gravity overrides player gravity in zone
 test("Gravity zone applies in its rect", () => {
   const def = LEVELS.find(l => l.id === "6-1");

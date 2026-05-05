@@ -248,10 +248,14 @@ export const LEVELS = [
   {
     id: "2-4", name: "Lab 2-4 · Spike Sandwich",
     ...w2(4),
-    intro: "Spikes top AND bottom. Find the gap.",
+    intro: "Spikes top AND bottom. Find the gap, time the laser.",
+    // Safe pad of solid floor under the spawn (col 3) and exit (col 25),
+    // and matching gaps in the ceiling spikes directly above each so the
+    // player has a real start and finish platform. Everything between is
+    // the sandwich they must traverse.
     layout: [
       "##############################",
-      "#vvvvvvvvvvvvvvvvvvvvvvvvvvvv#",
+      "#vv.vvvvvvvvvvvvvvvvvvvvv.vvv#",
       "#............................#",
       "#............................#",
       "#............................#",
@@ -263,7 +267,7 @@ export const LEVELS = [
       "#............................#",
       "#............................#",
       "#..@......................E..#",
-      "#^^^^^^^^^^.........^^^^^^^^^#",
+      "#^^#^^^^^^^.........^^^^^#^^^#",
       "##############################",
       "##############################",
       "##############################",
