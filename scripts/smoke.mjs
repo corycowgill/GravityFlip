@@ -130,13 +130,31 @@ test("Spike kills player on contact", () => {
   assert(!p.alive, "player should die on spike");
 });
 
-// 7. Flip cooldown prevents instant double flips of same direction
-test("Flip cooldown rejects duplicate", () => {
+// 7. Flip API: immediate vs buffered vs rejected
+test("Flip API returns ok/buffered/null correctly", () => {
   const lvl = new Level(LEVELS[0]);
   const p = new Player();
   p.spawnAt(lvl.spawn.x, lvl.spawn.y);
-  assert(p.tryFlip("up") === true, "first flip should succeed");
-  assert(p.tryFlip("up") === false, "same-direction flip should be no-op");
+  // First flip: should apply immediately
+  assert(p.tryFlip("up") === "ok", "first flip should return 'ok'");
+  // Same direction immediately after: cooldown active, gets buffered
+  assert(p.tryFlip("up") === "buffered", "during cooldown should buffer");
+  // Bad direction string returns null
+  assert(p.tryFlip("nope") === null, "invalid dir should return null");
+  // After cooldown ends and no buffered no-op, identical-direction returns null
+  for (let i = 0; i < 30; i++) p.update(1/120, lvl, {});
+  assert(p.tryFlip("up") === null, "same dir w/o cooldown should return null");
+});
+
+// 7b. Buffered flip applies after cooldown
+test("Buffered flip applies when cooldown ends", () => {
+  const lvl = new Level(LEVELS[0]);
+  const p = new Player();
+  p.spawnAt(lvl.spawn.x, lvl.spawn.y);
+  p.tryFlip("up");                      // cooldown starts
+  assert(p.tryFlip("right") === "buffered", "buffered during cooldown");
+  for (let i = 0; i < 20; i++) p.update(1/120, lvl, {});
+  assert(p.gravity === GRAV.RIGHT, "buffered flip should apply");
 });
 
 // 8. Save round-trip
@@ -196,12 +214,139 @@ test("Active laser kills player", async () => {
 test("Gravity zone applies in its rect", () => {
   const def = LEVELS.find(l => l.id === "6-1");
   const lvl = new Level(def);
-  // In left half, gravity should fall back to default DOWN
   const left = lvl.gravityAt(5 * TILE, 5 * TILE, GRAV.DOWN);
   assert(left.y === 1 && left.x === 0, "left zone should fall back to player gravity");
-  // In right half (zone), gravity should be RIGHT
   const right = lvl.gravityAt(20 * TILE, 5 * TILE, GRAV.DOWN);
   assert(right.x === 1 && right.y === 0, "right zone should override gravity to right");
+});
+
+// 12. Landing produces a "land" event when impact is hard enough
+test("Hard landing emits 'land' event with squash", () => {
+  const lvl = new Level(LEVELS[0]); // tall room (rows 1..12 empty, 13+ floor)
+  const p = new Player();
+  // Spawn near top of the open area, well inside an empty cell
+  p.spawnAt(8 * TILE + 16, 2 * TILE + 16);
+  let landed = false;
+  for (let i = 0; i < 600; i++) {
+    p.update(1/120, lvl, {});
+    if (p.events.some(e => e.type === "land")) { landed = true; break; }
+  }
+  assert(landed, "should emit 'land' event after free fall");
+  assert(p.squashT > 0, "squash should be active after hard landing");
+});
+
+// 13. Directional spike: contact from non-dangerous side does NOT kill
+test("SPIKE_U is safe from below (back side)", () => {
+  // Build a tiny synthetic level: spike at row 8, player approaches from below
+  const def = {
+    id: "test-spike", name: "test", world: 0, worldName: "test",
+    layout: [
+      "##############################",
+      "#............................#",
+      "#............................#",
+      "#............................#",
+      "#............................#",
+      "#............................#",
+      "#............................#",
+      "#............................#",
+      "#......^.....................#",   // spike up at col 6
+      "#............................#",
+      "#............................#",
+      "#............................#",
+      "#............................#",
+      "##############################",
+      "##############################",
+      "##############################",
+      "##############################",
+    ].join("\n"),
+  };
+  const lvl = new Level(def);
+  const p = new Player();
+  // Place player just BELOW the spike (row 9)
+  p.spawnAt(6 * TILE + 16, 9 * TILE + 24);
+  // Flip up so player approaches the spike from below toward its back side.
+  // SPIKE_U's kill zone is the TOP 20px of the tile, so contact from below
+  // should not kill the player on initial frames.
+  p.tryFlip("up");
+  for (let i = 0; i < 5; i++) p.update(1/120, lvl, {});
+  assert(p.alive, "player should not die from spike's safe back side");
+});
+
+// 14. Glass tile breaks when player hits at high speed and disappears
+test("Glass shatters on high-speed impact", () => {
+  // Build synthetic: player drops onto a row of glass
+  const def = {
+    id: "test-glass", name: "test", world: 0, worldName: "test",
+    layout: [
+      "##############################",
+      "#............................#",
+      "#............................#",
+      "#............................#",
+      "#............................#",
+      "#............................#",
+      "#............................#",
+      "#............................#",
+      "#............................#",
+      "#............................#",
+      "#............................#",
+      "#......GGGGGG................#",
+      "#..@.........................#",
+      "##############################",
+      "##############################",
+      "##############################",
+      "##############################",
+    ].join("\n"),
+  };
+  const lvl = new Level(def);
+  const p = new Player();
+  // Place player above glass and let them fall fast onto it
+  p.spawnAt(8 * TILE + 16, 2 * TILE + 16);
+  let glassEvt = false;
+  for (let i = 0; i < 400; i++) {
+    p.update(1/120, lvl, {});
+    if (p.events.some(e => e.type === "glass")) glassEvt = true;
+    p.events.length = 0;
+    if (!p.alive) break;
+  }
+  assert(glassEvt, "glass should break on high-speed impact");
+});
+
+// 15. Bounce pad works in horizontal gravity
+test("Bounce pad fires in horizontal gravity", () => {
+  // Bounce pad in the same row as the player so they fly into it.
+  const def = {
+    id: "test-bounce", name: "test", world: 0, worldName: "test",
+    layout: [
+      "##############################",
+      "#............................#",
+      "#............................#",
+      "#............................#",
+      "#............................#",
+      "#............................#",
+      "#............................#",
+      "#............................#",
+      "#............................#",
+      "#............................#",
+      "#............................#",
+      "#............................#",
+      "#..@........................B#",
+      "##############################",
+      "##############################",
+      "##############################",
+      "##############################",
+    ].join("\n"),
+  };
+  const lvl = new Level(def);
+  const p = new Player();
+  p.spawnAt(lvl.spawn.x, lvl.spawn.y);
+  p.tryFlip("right");
+  let bounced = false;
+  for (let i = 0; i < 600; i++) {
+    p.update(1/120, lvl, {});
+    if (p.events.some(e => e.type === "bounce")) { bounced = true; break; }
+    p.events.length = 0;
+  }
+  assert(bounced, "bounce should trigger on horizontal contact");
 });
 
 console.log(`\n${pass} passed, ${fail} failed`);

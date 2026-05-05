@@ -1,7 +1,7 @@
 // Game: ties level + player + hazards + render together.
 import { Level } from "./level.js";
 import { Player, GRAV } from "./player.js";
-import { TILE, COLS, ROWS, T, isSolid, isLethalTile, spikeDir } from "./tiles.js";
+import { TILE, COLS, ROWS, T, isSolid } from "./tiles.js";
 
 export class Game {
   constructor(engine, audio, save) {
@@ -27,6 +27,9 @@ export class Game {
     this.elapsed = 0;
     this.onWin = null;
     this.onDeath = null;
+    // Camera shake
+    this.shakeT = 0;
+    this.shakeMag = 0;
     this._hookInput();
   }
 
@@ -34,15 +37,18 @@ export class Game {
     const inp = this.engine.input;
     inp.on("flip", (dir) => {
       if (this.state !== "play") return;
-      if (this.player.tryFlip(dir)) {
-        this.audio.resume();
-        this.audio.flip();
-        this._spawnFlipFx();
-        this._updateBgRotTarget();
-      }
+      this.audio.resume();
+      // The Player emits a "flip" event for both immediate and buffered flips.
+      // FX/audio happen there so we never double-fire.
+      this.player.tryFlip(dir);
     });
     inp.on("slow", (v) => { this.slow = !!v; });
     inp.on("restart", () => { if (this.state === "play" || this.state === "dead") this.restart(); });
+  }
+
+  _shake(mag, dur) {
+    if (mag > this.shakeMag) this.shakeMag = mag;
+    if (dur > this.shakeT) this.shakeT = dur;
   }
 
   load(def) {
@@ -58,6 +64,7 @@ export class Game {
     this.particles.length = 0;
     this.flashT = 0;
     this.bgRot = 0; this.targetBgRot = 0;
+    this.shakeT = 0; this.shakeMag = 0;
 
     // Build dynamic objects
     this.dynObjs = this.level.objects.map((o, i) => ({
@@ -154,11 +161,21 @@ export class Game {
     if (this.onWin) this.onWin({ id: this.def.id, time: this.elapsed });
   }
 
-  update(dt) {
+  update(dtRaw) {
     if (this.state === "menu") return;
+    // Slow-mo affects EVERYTHING (lasers, crates, particles, rotations) so the
+    // world reads consistently. Render-side effects (camera shake decay) use
+    // raw dt so the screen still feels responsive.
+    const dt = this.slow ? dtRaw * 0.4 : dtRaw;
     this.t += dt;
 
-    // Background rotation easing (subtle)
+    // Camera shake decays on real time so it always feels punchy.
+    if (this.shakeT > 0) {
+      this.shakeT = Math.max(0, this.shakeT - dtRaw);
+      if (this.shakeT === 0) this.shakeMag = 0;
+    }
+
+    // Background rotation easing
     let diff = this.targetBgRot - this.bgRot;
     while (diff > 180) diff -= 360;
     while (diff < -180) diff += 360;
@@ -168,7 +185,7 @@ export class Game {
 
     if (this.flashT > 0) this.flashT = Math.max(0, this.flashT - dt);
 
-    // Update lasers
+    // Update lasers (now slowed by dt)
     for (const l of this.lasers) {
       if (l.period) {
         l.phase += dt;
@@ -178,27 +195,25 @@ export class Game {
       }
     }
 
-    // Update level dynamic tiles (e.g., pressure plate -> doors)
     this._updatePlatesAndDoors();
 
     if (this.state === "play") {
-      this.player.update(dt, this.level, { slow: this.slow });
-
-      // Update dynamic objects
+      this.player.update(dt, this.level, {});
+      this._drainPlayerEvents();
       this._updateDynObjs(dt);
 
-      // Win check: overlap exit tile
+      // Win check
       const cx = this.player.x + this.player.w / 2;
       const cy = this.player.y + this.player.h / 2;
       const tile = this.level.getTile(Math.floor(cx / TILE), Math.floor(cy / TILE));
       if (tile === T.EXIT) this._onWin();
 
-      // Out of bounds = death
+      // Out of bounds
       if (cx < -32 || cy < -32 || cx > COLS * TILE + 32 || cy > ROWS * TILE + 32) {
         this._killPlayer();
       }
 
-      // Laser hit check
+      // Lasers
       if (this.player.alive) {
         for (const l of this.lasers) {
           if (l.active && this._segmentHitsRect(l, this.player)) {
@@ -208,15 +223,15 @@ export class Game {
         }
       }
 
-      if (!this.player.alive) {
-        // _killPlayer was called via spike check
+      if (!this.player.alive && this.state === "play") {
+        // Player died inside its own update (spike). Sync game state.
+        this._killPlayer();
       }
     } else if (this.state === "dead") {
-      this.deathT += dt;
+      this.deathT += dtRaw; // restart timer uses real time
       if (this.deathT > 0.85) this.restart();
     } else if (this.state === "win") {
-      this.winT += dt;
-      if (this.onWin && !this._winNotified) { this._winNotified = false; }
+      this.winT += dtRaw;
     }
 
     // Particles
@@ -229,9 +244,45 @@ export class Game {
     }
     this.particles = this.particles.filter(p => p.age < p.life);
 
-    // Flip rings
     for (const f of this.flipFx) f.t += dt;
     this.flipFx = this.flipFx.filter(f => f.t < f.max);
+  }
+
+  _drainPlayerEvents() {
+    const evts = this.player.events;
+    if (evts.length === 0) return;
+    for (const e of evts) {
+      if (e.type === "land") {
+        this.audio.land();
+        // Stronger impact = more shake. Cap to avoid disorientation.
+        const mag = Math.min(8, (e.speed - 380) / 60);
+        this._shake(mag, 0.18);
+      } else if (e.type === "bounce") {
+        this.audio.bounce();
+        this._shake(3, 0.12);
+      } else if (e.type === "glass") {
+        // Shatter SFX and particles
+        this.audio.click();
+        this._shake(4, 0.15);
+        const px = e.gx * TILE + TILE / 2;
+        const py = e.gy * TILE + TILE / 2;
+        for (let i = 0; i < 16; i++) {
+          const a = Math.random() * Math.PI * 2;
+          const sp = 100 + Math.random() * 220;
+          this.particles.push({
+            x: px, y: py, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+            life: 0.4 + Math.random() * 0.3, age: 0, color: "#5cf2ff",
+          });
+        }
+      } else if (e.type === "die") {
+        this._shake(7, 0.35);
+      } else if (e.type === "flip") {
+        this.audio.flip();
+        this._spawnFlipFx();
+        this._updateBgRotTarget();
+      }
+    }
+    evts.length = 0;
   }
 
   _updatePlatesAndDoors() {
@@ -274,8 +325,8 @@ export class Game {
 
   _updateDynObjs(dt) {
     const lvl = this.level;
-    const ACCEL = 1700;
-    const MAX_FALL = 700;
+    const ACCEL = 2100;        // match player accel
+    const MAX_FALL = 760;
     for (const o of this.dynObjs) {
       // Desync delay
       if (o.pendingGravity && o.desyncTimer > 0) {
@@ -285,34 +336,71 @@ export class Game {
           o.pendingGravity = null;
         }
       }
-      const g = lvl.gravityAt(o.x + o.w/2, o.y + o.h/2, o.gravity);
+      const g = lvl.gravityAt(o.x + o.w / 2, o.y + o.h / 2, o.gravity);
       const w = o.props.weight || 1;
-      o.vx += g.x * ACCEL * dt / Math.sqrt(w);
-      o.vy += g.y * ACCEL * dt / Math.sqrt(w);
-      const cap = MAX_FALL / Math.sqrt(w);
+
+      // Heavier objects fall slower and accelerate slower.
+      const wScale = 1 / w;
+      o.vx += g.x * ACCEL * dt * wScale;
+      o.vy += g.y * ACCEL * dt * wScale;
+      const cap = MAX_FALL * wScale;
       if (o.vx > cap) o.vx = cap;
       if (o.vx < -cap) o.vx = -cap;
       if (o.vy > cap) o.vy = cap;
       if (o.vy < -cap) o.vy = -cap;
 
-      // Move with collisions vs solids AND vs other dynObjs (simple stack)
       this._moveDyn(o, o.vx * dt, 0);
       this._moveDyn(o, 0, o.vy * dt);
 
-      // Spheres roll: small horizontal accel in gravity-perpendicular if on slope... we skip slopes
-      if (o.kind === "sphere") {
-        // air drag
-        if (g.y !== 0) o.vx *= 0.995;
-        else o.vy *= 0.995;
+      // Surface effects on dyn objects: conveyors push them too.
+      const grounded = this._dynGrounded(o, g);
+      if (grounded) {
+        let footX = o.x + o.w / 2, footY = o.y + o.h / 2;
+        if (g.y > 0) footY = o.y + o.h + 1;
+        else if (g.y < 0) footY = o.y - 1;
+        else if (g.x > 0) footX = o.x + o.w + 1;
+        else if (g.x < 0) footX = o.x - 1;
+        const tile = lvl.getTile(Math.floor(footX / TILE), Math.floor(footY / TILE));
+        if (tile === T.CONVEYOR_R) {
+          const target = 200 / w;
+          o.vx += (target - o.vx) * Math.min(1, dt * 6);
+        } else if (tile === T.CONVEYOR_L) {
+          const target = -200 / w;
+          o.vx += (target - o.vx) * Math.min(1, dt * 6);
+        } else if (tile === T.BOUNCE) {
+          // Bounce dyn objs too
+          if (g.y > 0)      { o.vy = -700; this.audio.bounce(); }
+          else if (g.y < 0) { o.vy =  700; this.audio.bounce(); }
+          else if (g.x > 0) { o.vx = -700; this.audio.bounce(); }
+          else if (g.x < 0) { o.vx =  700; this.audio.bounce(); }
+        } else if (tile === T.ICE) {
+          // no friction
+        } else {
+          // Light friction on perpendicular axis so crates don't drift forever.
+          if (g.y !== 0) o.vx *= 1 - Math.min(1, dt * 8);
+          else o.vy *= 1 - Math.min(1, dt * 8);
+        }
+      } else {
+        // Air drag
+        if (g.y !== 0) o.vx *= 1 - Math.min(1, dt * 0.6);
+        else o.vy *= 1 - Math.min(1, dt * 0.6);
       }
-
-      // Lethal contact with spikes destroys the object? For now, treat them as fine.
     }
 
-    // Player-vs-crate push: simple — if player overlaps a crate, push it along player's gravity
+    // Player vs crate interaction
     for (const o of this.dynObjs) {
       this._resolvePlayerVsObj(o);
     }
+  }
+
+  _dynGrounded(o, g) {
+    const lvl = this.level;
+    let probeX = o.x + o.w / 2, probeY = o.y + o.h / 2;
+    if (g.y > 0) probeY = o.y + o.h + 1;
+    else if (g.y < 0) probeY = o.y - 1;
+    else if (g.x > 0) probeX = o.x + o.w + 1;
+    else if (g.x < 0) probeX = o.x - 1;
+    return lvl.isSolidAt(Math.floor(probeX / TILE), Math.floor(probeY / TILE));
   }
 
   _moveDyn(o, dx, dy) {
@@ -364,47 +452,65 @@ export class Game {
 
   _resolvePlayerVsObj(o) {
     const p = this.player;
-    if (p.x < o.x + o.w && p.x + p.w > o.x &&
-        p.y < o.y + o.h && p.y + p.h > o.y) {
-      // Resolve along gravity axis preferentially: push the object
-      const g = p.gravity;
-      if (g.y !== 0) {
-        // Vertical gravity: stand on top of crate
-        if (g.y > 0 && p.y + p.h - 6 < o.y) {
-          p.y = o.y - p.h;
-          if (p.vy > 0) p.vy = 0;
-        } else if (g.y < 0 && p.y + 6 > o.y + o.h) {
-          p.y = o.y + o.h;
-          if (p.vy < 0) p.vy = 0;
-        } else {
-          // Horizontal push
-          this._tryPush(o, p.vx, 0);
-          if (p.x + p.w > o.x && p.x < o.x) p.x = o.x - p.w;
-          else if (p.x < o.x + o.w && p.x + p.w > o.x + o.w) p.x = o.x + o.w;
+    if (!(p.x < o.x + o.w && p.x + p.w > o.x &&
+          p.y < o.y + o.h && p.y + p.h > o.y)) return;
+
+    // Find smallest-axis overlap for clean separation.
+    const overlapL = (p.x + p.w) - o.x;
+    const overlapR = (o.x + o.w) - p.x;
+    const overlapT = (p.y + p.h) - o.y;
+    const overlapB = (o.y + o.h) - p.y;
+    const minH = Math.min(overlapL, overlapR);
+    const minV = Math.min(overlapT, overlapB);
+    const eg = p.effGravity || p.gravity;
+    const w = o.props.weight || 1;
+
+    // Pre-bias toward the gravity axis: if the player is "on top" of the
+    // crate (in their gravity sense), prefer vertical resolution.
+    const gravAxisIsY = eg.y !== 0;
+    const preferVertical = gravAxisIsY ? minV <= minH * 1.4 : minV * 1.4 < minH;
+
+    if (preferVertical) {
+      // Resolve on Y axis
+      if (overlapT < overlapB) {
+        // Player's bottom is colliding with crate's top → land on crate
+        p.y = o.y - p.h;
+        if (eg.y > 0) p.grounded = true;
+        if (p.vy > 0) {
+          // Transfer some velocity to crate (only if crate can move)
+          const transfer = Math.min(p.vy, 220 / w);
+          o.vy = Math.max(o.vy, transfer * 0.5);
+          p.vy = 0;
         }
       } else {
-        if (g.x > 0 && p.x + p.w - 6 < o.x) {
-          p.x = o.x - p.w;
-          if (p.vx > 0) p.vx = 0;
-        } else if (g.x < 0 && p.x + 6 > o.x + o.w) {
-          p.x = o.x + o.w;
-          if (p.vx < 0) p.vx = 0;
-        } else {
-          this._tryPush(o, 0, p.vy);
-          if (p.y + p.h > o.y && p.y < o.y) p.y = o.y - p.h;
-          else if (p.y < o.y + o.h && p.y + p.h > o.y + o.h) p.y = o.y + o.h;
+        p.y = o.y + o.h;
+        if (eg.y < 0) p.grounded = true;
+        if (p.vy < 0) {
+          const transfer = Math.max(p.vy, -220 / w);
+          o.vy = Math.min(o.vy, transfer * 0.5);
+          p.vy = 0;
         }
       }
+    } else {
+      // Resolve on X axis (push the crate)
+      const dir = overlapL < overlapR ? 1 : -1; // +1: player on left side, push right
+      const speedCap = 220 / w;
+      const desired = Math.sign(p.vx) === dir ? Math.min(Math.abs(p.vx), speedCap) * dir : 0;
+      // Try to move the crate by a tiny step in the player's direction.
+      const before = o.x;
+      this._moveDyn(o, dir * Math.min(Math.abs(p.vx) * 0.016, 4), 0);
+      const moved = o.x - before;
+      if (Math.abs(moved) < 0.5) {
+        // Crate didn't move (wall behind it) — stop the player
+        if (dir > 0) p.x = o.x - p.w; else p.x = o.x + o.w;
+        if (Math.sign(p.vx) === dir) p.vx = 0;
+      } else {
+        // Crate moved — keep player flush with crate
+        if (dir > 0) p.x = o.x - p.w; else p.x = o.x + o.w;
+        // Boost crate vel toward desired so it carries momentum
+        if (Math.abs(o.vx) < Math.abs(desired)) o.vx = desired;
+      }
     }
-  }
-
-  _tryPush(o, vx, vy) {
-    // Cap push speed by weight
-    const w = o.props.weight || 1;
-    const sx = Math.sign(vx) * Math.min(Math.abs(vx), 90 / w);
-    const sy = Math.sign(vy) * Math.min(Math.abs(vy), 90 / w);
-    if (Math.abs(sx) > 0.001) this._moveDyn(o, sx * 0.016, 0);
-    if (Math.abs(sy) > 0.001) this._moveDyn(o, 0, sy * 0.016);
   }
 
   _segmentHitsRect(seg, rect) {
@@ -418,6 +524,15 @@ export class Game {
       this._renderBackground(ctx);
       return;
     }
+    // Camera shake offset (random per frame, magnitude decays with shakeT)
+    let sx = 0, sy = 0;
+    if (this.shakeT > 0 && this.shakeMag > 0) {
+      const k = this.shakeMag * (this.shakeT / 0.35);
+      sx = (Math.random() * 2 - 1) * k;
+      sy = (Math.random() * 2 - 1) * k;
+    }
+    ctx.save();
+    ctx.translate(sx, sy);
     this._renderBackground(ctx);
     this._renderLevel(ctx);
     this._renderObjects(ctx);
@@ -425,9 +540,23 @@ export class Game {
     this._renderPlayer(ctx);
     this._renderParticles(ctx);
     this._renderFlipFx(ctx);
+    ctx.restore();
+    // Overlays should NOT shake (they're UI)
     this._renderFlash(ctx);
     if (this.state === "dead") this._renderDeathOverlay(ctx);
     if (this.state === "win") this._renderWinOverlay(ctx);
+    if (this.slow) this._renderSlowmoVignette(ctx);
+  }
+
+  _renderSlowmoVignette(ctx) {
+    const W = this.engine.width, H = this.engine.height;
+    const grad = ctx.createRadialGradient(W/2, H/2, Math.min(W,H)*0.2, W/2, H/2, Math.max(W,H)*0.7);
+    grad.addColorStop(0, "rgba(92,242,255,0)");
+    grad.addColorStop(1, "rgba(92,242,255,0.18)");
+    ctx.save();
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, H);
+    ctx.restore();
   }
 
   _renderBackground(ctx) {
@@ -548,11 +677,34 @@ export class Game {
   _renderPlayer(ctx) {
     const p = this.player;
     if (!p.alive) return;
+
+    // Motion trail ghosts (drawn behind the player at older positions)
+    for (const s of p.trail) {
+      const a = (1 - s.t / 0.12) * 0.35;
+      ctx.save();
+      ctx.translate(s.x + p.w / 2, s.y + p.h / 2);
+      ctx.rotate((s.rot * Math.PI) / 180);
+      ctx.globalAlpha = a;
+      ctx.fillStyle = "#5cf2ff";
+      ctx.fillRect(-p.w / 2, -p.h / 2, p.w, p.h);
+      ctx.restore();
+    }
+
+    // Squash/stretch on impact: 1.25x along impact axis, 0.8 perp.
+    let sx = 1, sy = 1;
+    if (p.squashT > 0) {
+      const k = p.squashT / 0.13; // 1 -> 0
+      const stretch = 1 + 0.25 * k;
+      const squash = 1 - 0.20 * k;
+      if (p.squashAxis === "y") { sx = stretch; sy = squash; }
+      else                       { sx = squash;  sy = stretch; }
+    }
+
     const cx = p.x + p.w / 2, cy = p.y + p.h / 2;
     ctx.save();
     ctx.translate(cx, cy);
     ctx.rotate((p.visualRot * Math.PI) / 180);
-    // Glow
+    ctx.scale(sx, sy);
     if (p.flipFlash > 0) {
       const a = p.flipFlash / 0.18;
       ctx.shadowColor = "rgba(92,242,255," + a + ")";
