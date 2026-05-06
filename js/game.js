@@ -418,14 +418,28 @@ export class Game {
       return false;
     };
     let activePlates = 0, totalPlates = 0;
+    const prevActive = this._activePlates || new Set();
     this._activePlates = new Set();
     for (let y = 0; y < ROWS; y++) {
       for (let x = 0; x < COLS; x++) {
-        if (lvl.baseGrid[y * COLS + x] === T.PLATE) {
+        const i = y * COLS + x;
+        if (lvl.baseGrid[i] === T.PLATE) {
           totalPlates++;
           if (plateActive(x, y)) {
             activePlates++;
-            this._activePlates.add(y * COLS + x);
+            this._activePlates.add(i);
+            // Edge-trigger: plate JUST pressed → magenta pop FX + click SFX
+            if (!prevActive.has(i)) {
+              const cx = x * TILE + TILE / 2;
+              const cy = y * TILE + TILE / 2;
+              for (let n = 0; n < 10; n++) {
+                const a = Math.random() * Math.PI - Math.PI; // upward fan
+                const sp = 90 + Math.random() * 110;
+                this._spawnParticle(cx, cy - 4, Math.cos(a) * sp, Math.sin(a) * sp,
+                                    0.4 + Math.random() * 0.3, "#ff8aff");
+              }
+              this.audio.click();
+            }
           }
         }
       }
@@ -1033,7 +1047,7 @@ export class Game {
         continue;
       }
 
-      // Active beam: thick glow + bright core + traveling band
+      // Active beam: thick glow + bright core + animated stripes + pulse
       ctx.save();
       ctx.globalCompositeOperation = "lighter";
       // Glow pass
@@ -1049,6 +1063,22 @@ export class Game {
       ctx.beginPath();
       ctx.moveTo(l.x1, l.y1); ctx.lineTo(l.x2, l.y2);
       ctx.stroke();
+      // Animated diagonal stripes inside the beam (energy flow). Each stripe
+      // is a short perpendicular tick that slides along the beam over time.
+      const px2 = -ny, py2 = nx; // perpendicular unit
+      const stripeSpacing = 14;
+      const stripeOffset = (t * 280) % stripeSpacing;
+      ctx.strokeStyle = "rgba(255,235,235,0.55)";
+      ctx.lineWidth = 1.2;
+      for (let s2 = -stripeSpacing; s2 < len; s2 += stripeSpacing) {
+        const dist = s2 + stripeOffset;
+        if (dist < -2 || dist > len + 2) continue;
+        const mx = l.x1 + nx * dist, my = l.y1 + ny * dist;
+        ctx.beginPath();
+        ctx.moveTo(mx + px2 * 1.6, my + py2 * 1.6);
+        ctx.lineTo(mx - px2 * 1.6, my - py2 * 1.6);
+        ctx.stroke();
+      }
       // Core
       ctx.strokeStyle = "rgba(255,255,255,1)";
       ctx.lineWidth = 1.4;
@@ -1058,13 +1088,13 @@ export class Game {
 
       // Traveling pulse: bright dot moving along beam
       const phase = (t * 380) % (len + 60) - 30;
-      const px = l.x1 + nx * phase, py = l.y1 + ny * phase;
-      const grad = ctx.createRadialGradient(px, py, 0, px, py, 18);
+      const ppx = l.x1 + nx * phase, ppy = l.y1 + ny * phase;
+      const grad = ctx.createRadialGradient(ppx, ppy, 0, ppx, ppy, 18);
       grad.addColorStop(0, "rgba(255,255,255,1)");
       grad.addColorStop(0.4, "rgba(255,180,180,0.7)");
       grad.addColorStop(1, "rgba(255,90,107,0)");
       ctx.fillStyle = grad;
-      ctx.fillRect(px - 18, py - 18, 36, 36);
+      ctx.fillRect(ppx - 18, ppy - 18, 36, 36);
       ctx.restore();
     }
   }
@@ -1176,21 +1206,53 @@ export class Game {
     ctx.fillStyle = "rgba(255,255,255,0.32)";
     roundRect(ctx, -p.w / 2 + 4, -p.h / 2 + 4, p.w - 8, 4, 2);
     ctx.fill();
-    // Eyes — local +Y is "down" relative to gravity. Place eyes upper-third.
-    const eyeY = -p.h / 2 + 7;
-    const blink = (Math.sin(this.t * 2.0 + p.x * 0.01) > 0.985) ? 0 : 1; // rare blink
+    // Eyes track velocity in the LOCAL frame (the player is rotated to match
+    // gravity, so we counter-rotate the world velocity to figure out where
+    // they should "look"). Mouth changes shape by state: neutral when idle,
+    // shocked "o" on hard impact (squashing), small line when zooming.
+    const eyeBaseY = -p.h / 2 + 7;
+    const rot = (p.visualRot * Math.PI) / 180;
+    const cosR = Math.cos(rot), sinR = Math.sin(rot);
+    // Counter-rotate by -rot: local_vx = world_vx*cos + world_vy*sin
+    const localVx = p.vx * cosR + p.vy * sinR;
+    const localVy = -p.vx * sinR + p.vy * cosR;
+    const speed = Math.hypot(p.vx, p.vy);
+    const lookK = Math.min(1, speed / 600);
+    const eyeOffX = Math.max(-2, Math.min(2, localVx / 600 * 1.6 * lookK));
+    const eyeOffY = Math.max(-1.5, Math.min(1.5, localVy / 600 * 1.2 * lookK));
+    const blink = (Math.sin(this.t * 2.0 + p.x * 0.01) > 0.985) ? 0 : 1;
     ctx.fillStyle = "#06080f";
     if (blink) {
-      ctx.beginPath(); ctx.arc(-4, eyeY, 1.7, 0, Math.PI * 2); ctx.fill();
-      ctx.beginPath(); ctx.arc( 4, eyeY, 1.7, 0, Math.PI * 2); ctx.fill();
-      // Tiny highlight
+      ctx.beginPath(); ctx.arc(-4 + eyeOffX, eyeBaseY + eyeOffY, 1.7, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc( 4 + eyeOffX, eyeBaseY + eyeOffY, 1.7, 0, Math.PI * 2); ctx.fill();
       ctx.fillStyle = "rgba(255,255,255,0.85)";
-      ctx.fillRect(-4.6, eyeY - 1.2, 1, 1);
-      ctx.fillRect( 3.4, eyeY - 1.2, 1, 1);
+      ctx.fillRect(-4.6 + eyeOffX, eyeBaseY - 1.2 + eyeOffY, 1, 1);
+      ctx.fillRect( 3.4 + eyeOffX, eyeBaseY - 1.2 + eyeOffY, 1, 1);
     } else {
-      // Closed eye line
-      ctx.fillRect(-5.5, eyeY - 0.5, 3, 1);
-      ctx.fillRect( 2.5, eyeY - 0.5, 3, 1);
+      ctx.fillRect(-5.5, eyeBaseY - 0.5, 3, 1);
+      ctx.fillRect( 2.5, eyeBaseY - 0.5, 3, 1);
+    }
+    // Mouth — three states:
+    //   shocked "o" on hard impact (squashT > 0)
+    //   slight smile when calm
+    //   tight line when moving fast
+    const mouthY = p.h / 2 - 6;
+    ctx.fillStyle = "#06080f";
+    if (p.squashT > 0.04) {
+      // Shocked open mouth
+      ctx.beginPath();
+      ctx.arc(0, mouthY, 1.8, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (speed > 460) {
+      // Tight line, focused
+      ctx.fillRect(-3, mouthY, 6, 0.8);
+    } else {
+      // Subtle smile arc
+      ctx.strokeStyle = "#06080f";
+      ctx.lineWidth = 0.9;
+      ctx.beginPath();
+      ctx.arc(0, mouthY - 0.5, 2.4, Math.PI * 0.18, Math.PI - Math.PI * 0.18);
+      ctx.stroke();
     }
     ctx.restore();
   }
@@ -1667,6 +1729,22 @@ function drawSpike(ctx, lvl, gx, gy, dir) {
   else if (dir === "down") ctx.fillRect(x, y, s, 6);
   else if (dir === "left") ctx.fillRect(x + s - 6, y, 6, s);
   else if (dir === "right") ctx.fillRect(x, y, 6, s);
+  // Mounting bolts on the base pad — two small darker dots so the spikes
+  // read as installed hardware, not floating triangles.
+  ctx.fillStyle = "#070a16";
+  if (dir === "up") {
+    ctx.fillRect(x + 4,     y + s - 3, 1.5, 1.5);
+    ctx.fillRect(x + s - 6, y + s - 3, 1.5, 1.5);
+  } else if (dir === "down") {
+    ctx.fillRect(x + 4,     y + 1.5,   1.5, 1.5);
+    ctx.fillRect(x + s - 6, y + 1.5,   1.5, 1.5);
+  } else if (dir === "left") {
+    ctx.fillRect(x + s - 3, y + 4,     1.5, 1.5);
+    ctx.fillRect(x + s - 3, y + s - 6, 1.5, 1.5);
+  } else if (dir === "right") {
+    ctx.fillRect(x + 1.5,   y + 4,     1.5, 1.5);
+    ctx.fillRect(x + 1.5,   y + s - 6, 1.5, 1.5);
+  }
 
   const N = 4;
   for (let i = 0; i < N; i++) {
