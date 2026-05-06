@@ -103,11 +103,16 @@ export class Game {
       props: o.props || {},
     }));
 
-    // Build lasers
+    // Build lasers. Every laser gets a small "preroll" — the first half-
+    // second after level load it's forced OFF, regardless of cycle. This
+    // gives the player a guaranteed observation window before timing
+    // matters, instead of forcing them to flip on frame 1 of an active
+    // beam they couldn't possibly have seen yet.
     this.lasers = (this.level.lasers || []).map(l => ({
       ...l,
       phase: l.phase || 0,
-      active: true,
+      preroll: l.preroll != null ? l.preroll : 0.5,
+      active: false,
     }));
 
     this.engine.input.setEnabled(true);
@@ -257,11 +262,19 @@ export class Game {
 
     // Update lasers (now slowed by dt) — also emit endpoint sparks while active.
     for (const l of this.lasers) {
+      if (l.preroll && l.preroll > 0) {
+        l.preroll -= dt;
+        l.active = false;
+        continue;
+      }
       if (l.period) {
         l.phase += dt;
         if (l.phase >= l.period) l.phase -= l.period;
         const duty = l.duty != null ? l.duty : 0.5;
         l.active = (l.phase / l.period) < duty;
+      } else if (l.duty != null && l.duty >= 1.0) {
+        // Always-on laser
+        l.active = true;
       }
       if (l.active && this.state === "play" && Math.random() < dt * 24) {
         // Random spark at one endpoint, kicked outward along the beam line.
@@ -315,7 +328,13 @@ export class Game {
       // Lasers
       if (this.player.alive) {
         for (const l of this.lasers) {
-          if (l.active && this._segmentHitsRect(l, this.player)) {
+          if (!l.active) continue;
+          // Laser is occluded by any solid dynamic object (crate / sphere).
+          // We compute the "effective end" of the beam — the point where
+          // it first hits an opaque object — and only test the player
+          // against that clipped segment.
+          const eff = this._effectiveLaserEnd(l);
+          if (segIntersectRect(l.x1, l.y1, eff.x, eff.y, this.player.x, this.player.y, this.player.w, this.player.h)) {
             this._killPlayer();
             break;
           }
@@ -651,6 +670,31 @@ export class Game {
   _segmentHitsRect(seg, rect) {
     // seg: {x1,y1,x2,y2}; rect: {x,y,w,h}
     return segIntersectRect(seg.x1, seg.y1, seg.x2, seg.y2, rect.x, rect.y, rect.w, rect.h);
+  }
+
+  // Where does the laser actually stop? We march from the emitter (x1,y1)
+  // and find the closest occluder (any dynamic object's AABB). Lasers no
+  // longer pass through crates / spheres — they're physically blocked,
+  // matching the design spec ("crates block lasers"). Returns the clipped
+  // endpoint plus a `blocked` flag (with the hit object's bbox so we can
+  // render a small impact spark there).
+  _effectiveLaserEnd(l) {
+    let bestT = 1.0;
+    let blockObj = null;
+    for (const o of this.dynObjs) {
+      const t = rayAabb(l.x1, l.y1, l.x2, l.y2, o.x, o.y, o.w, o.h);
+      if (t !== null && t < bestT) {
+        bestT = t;
+        blockObj = o;
+      }
+    }
+    return {
+      x: l.x1 + (l.x2 - l.x1) * bestT,
+      y: l.y1 + (l.y2 - l.y1) * bestT,
+      t: bestT,
+      blocked: blockObj !== null,
+      block: blockObj,
+    };
   }
 
   // ----------------- RENDER -----------------
@@ -1026,12 +1070,16 @@ export class Game {
   _renderLasers(ctx) {
     const t = this.t;
     for (const l of this.lasers) {
-      const len = Math.hypot(l.x2 - l.x1, l.y2 - l.y1);
-      const nx = (l.x2 - l.x1) / len, ny = (l.y2 - l.y1) / len;
+      // Clip to first occluding object so the visual matches the kill check.
+      const eff = l.active ? this._effectiveLaserEnd(l) : { x: l.x2, y: l.y2, blocked: false };
+      const ex = eff.x, ey = eff.y;
+      const fullLen = Math.hypot(l.x2 - l.x1, l.y2 - l.y1);
+      const len = Math.hypot(ex - l.x1, ey - l.y1);
+      const nx = (l.x2 - l.x1) / fullLen, ny = (l.y2 - l.y1) / fullLen;
 
-      // Source/end emitter discs (always visible, even when laser off)
+      // Source/end emitter discs (always visible, even when laser off / blocked)
       this._drawEmitter(ctx, l.x1, l.y1, !!l.active);
-      this._drawEmitter(ctx, l.x2, l.y2, !!l.active);
+      this._drawEmitter(ctx, l.x2, l.y2, !!l.active && !eff.blocked);
 
       if (!l.active) {
         // Idle: dashed thin guide
@@ -1047,25 +1095,24 @@ export class Game {
         continue;
       }
 
-      // Active beam: thick glow + bright core + animated stripes + pulse
+      // Active beam: thick glow + bright core + animated stripes + pulse.
+      // Drawn from emitter to effective end (which may be the occluder, not
+      // the original endpoint).
       ctx.save();
       ctx.globalCompositeOperation = "lighter";
-      // Glow pass
       ctx.strokeStyle = "rgba(255,92,107,0.55)";
       ctx.lineWidth = 10;
       ctx.lineCap = "round";
       ctx.beginPath();
-      ctx.moveTo(l.x1, l.y1); ctx.lineTo(l.x2, l.y2);
+      ctx.moveTo(l.x1, l.y1); ctx.lineTo(ex, ey);
       ctx.stroke();
-      // Mid pass
       ctx.strokeStyle = "rgba(255,140,150,0.85)";
       ctx.lineWidth = 4;
       ctx.beginPath();
-      ctx.moveTo(l.x1, l.y1); ctx.lineTo(l.x2, l.y2);
+      ctx.moveTo(l.x1, l.y1); ctx.lineTo(ex, ey);
       ctx.stroke();
-      // Animated diagonal stripes inside the beam (energy flow). Each stripe
-      // is a short perpendicular tick that slides along the beam over time.
-      const px2 = -ny, py2 = nx; // perpendicular unit
+      // Animated stripes
+      const px2 = -ny, py2 = nx;
       const stripeSpacing = 14;
       const stripeOffset = (t * 280) % stripeSpacing;
       ctx.strokeStyle = "rgba(255,235,235,0.55)";
@@ -1083,18 +1130,39 @@ export class Game {
       ctx.strokeStyle = "rgba(255,255,255,1)";
       ctx.lineWidth = 1.4;
       ctx.beginPath();
-      ctx.moveTo(l.x1, l.y1); ctx.lineTo(l.x2, l.y2);
+      ctx.moveTo(l.x1, l.y1); ctx.lineTo(ex, ey);
       ctx.stroke();
 
-      // Traveling pulse: bright dot moving along beam
-      const phase = (t * 380) % (len + 60) - 30;
-      const ppx = l.x1 + nx * phase, ppy = l.y1 + ny * phase;
-      const grad = ctx.createRadialGradient(ppx, ppy, 0, ppx, ppy, 18);
-      grad.addColorStop(0, "rgba(255,255,255,1)");
-      grad.addColorStop(0.4, "rgba(255,180,180,0.7)");
-      grad.addColorStop(1, "rgba(255,90,107,0)");
-      ctx.fillStyle = grad;
-      ctx.fillRect(ppx - 18, ppy - 18, 36, 36);
+      // Traveling pulse along the unblocked portion of the beam
+      if (len > 30) {
+        const phase = (t * 380) % (len + 60) - 30;
+        const ppx = l.x1 + nx * phase, ppy = l.y1 + ny * phase;
+        if (phase >= -10 && phase <= len + 10) {
+          const grad = ctx.createRadialGradient(ppx, ppy, 0, ppx, ppy, 18);
+          grad.addColorStop(0, "rgba(255,255,255,1)");
+          grad.addColorStop(0.4, "rgba(255,180,180,0.7)");
+          grad.addColorStop(1, "rgba(255,90,107,0)");
+          ctx.fillStyle = grad;
+          ctx.fillRect(ppx - 18, ppy - 18, 36, 36);
+        }
+      }
+
+      // Impact splash where the beam hits an occluder
+      if (eff.blocked) {
+        const impact = ctx.createRadialGradient(ex, ey, 0, ex, ey, 22);
+        impact.addColorStop(0, "rgba(255,255,255,1)");
+        impact.addColorStop(0.3, "rgba(255,160,160,0.85)");
+        impact.addColorStop(1, "rgba(255,90,107,0)");
+        ctx.fillStyle = impact;
+        ctx.fillRect(ex - 22, ey - 22, 44, 44);
+        // Occasional spark particle radiating from impact point
+        if (Math.random() < 0.5) {
+          const ang = Math.atan2(-ny, -nx) + (Math.random() - 0.5) * 1.6;
+          const sp = 80 + Math.random() * 120;
+          this._spawnParticle(ex, ey, Math.cos(ang) * sp, Math.sin(ang) * sp,
+                              0.3 + Math.random() * 0.2, "#ffb0a0");
+        }
+      }
       ctx.restore();
     }
   }
@@ -1810,6 +1878,36 @@ function drawArrow(ctx, cx, cy, dir, color) {
   ctx.closePath();
   ctx.fill();
   ctx.restore();
+}
+
+// Ray vs AABB. Returns the t (0..1) at which the segment from (x1,y1) to
+// (x2,y2) first ENTERS the rectangle, or null if it doesn't enter.
+// Standard slab-based intersection with axis-aligned-segment fallback.
+function rayAabb(x1, y1, x2, y2, rx, ry, rw, rh) {
+  const dx = x2 - x1, dy = y2 - y1;
+  let tMin = 0, tMax = 1;
+  if (Math.abs(dx) < 1e-6) {
+    if (x1 < rx || x1 > rx + rw) return null;
+  } else {
+    const t1 = (rx - x1) / dx;
+    const t2 = (rx + rw - x1) / dx;
+    const lo = Math.min(t1, t2), hi = Math.max(t1, t2);
+    if (lo > tMin) tMin = lo;
+    if (hi < tMax) tMax = hi;
+    if (tMin > tMax) return null;
+  }
+  if (Math.abs(dy) < 1e-6) {
+    if (y1 < ry || y1 > ry + rh) return null;
+  } else {
+    const t1 = (ry - y1) / dy;
+    const t2 = (ry + rh - y1) / dy;
+    const lo = Math.min(t1, t2), hi = Math.max(t1, t2);
+    if (lo > tMin) tMin = lo;
+    if (hi < tMax) tMax = hi;
+    if (tMin > tMax) return null;
+  }
+  if (tMin < 0 || tMin > 1) return null;
+  return tMin;
 }
 
 function segIntersectRect(x1, y1, x2, y2, rx, ry, rw, rh) {

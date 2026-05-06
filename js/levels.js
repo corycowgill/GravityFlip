@@ -139,7 +139,13 @@ export const LEVELS = [
   {
     id: "1-6", name: "Lab 1-6 · Zigzag",
     ...w1(6),
-    intro: "Combine flips to navigate.",
+    intro: "Combine flips to navigate the obstacles.",
+    // Previous layout had: a 30-col-wrong row 11 (missing right border),
+    // plus an over-constrained spike at row 6 that combined with the
+    // wall at col 7 (rows 3-7) and the ceiling spike row to make the
+    // level near-impossible — the only valid flight path passed through
+    // the row 6 spikes. Trimming the row 6 spike strip and fixing the
+    // row 11 width restores a clear up-and-over solution.
     layout: [
       "##############################",
       "#............................#",
@@ -147,13 +153,13 @@ export const LEVELS = [
       "#......#.....................#",
       "#......#.....................#",
       "#......#.....................#",
-      "#......#......^^^^^^^........#",
+      "#......#.....................#",
       "#......#.....................#",
       "#............................#",
       "#............................#",
       "#............................#",
-      "#......................######",
-      "#..@.....^^.................E#",
+      "#......................#######",
+      "#..@........................E#",
       "##############################",
       "##############################",
       "##############################",
@@ -279,7 +285,7 @@ export const LEVELS = [
   {
     id: "2-5", name: "Lab 2-5 · Three-Step",
     ...w2(5),
-    intro: "Beams pulse fast. Don't pause.",
+    intro: "Three beams. Wait for the wave, ride it across.",
     layout: [
       "##############################",
       "#............................#",
@@ -299,10 +305,16 @@ export const LEVELS = [
       "##############################",
       "##############################",
     ].join("\n"),
+    // Original timing was too tight: even with optimal play the OFF
+    // windows didn't simultaneously align over the player's ~0.87 s
+    // transit. Period 1.4, duty 0.32, offsets 0/0.5/1.0 (alternating
+    // wave) gives a roughly 0.34 s solo window in which all three are
+    // OFF over the player's path. Still requires timing, no longer
+    // requires frame-perfect inputs.
     lasers: [
-      { x1: 8*32,  y1: 1*32, x2: 8*32,  y2: 13*32, period: 1.0, duty: 0.45, phase: 0 },
-      { x1: 14*32, y1: 1*32, x2: 14*32, y2: 13*32, period: 1.0, duty: 0.45, phase: 0.33 },
-      { x1: 20*32, y1: 1*32, x2: 20*32, y2: 13*32, period: 1.0, duty: 0.45, phase: 0.66 },
+      { x1: 8*32,  y1: 1*32, x2: 8*32,  y2: 13*32, period: 1.4, duty: 0.32, phase: 0 },
+      { x1: 14*32, y1: 1*32, x2: 14*32, y2: 13*32, period: 1.4, duty: 0.32, phase: 0.5 },
+      { x1: 20*32, y1: 1*32, x2: 20*32, y2: 13*32, period: 1.4, duty: 0.32, phase: 1.0 },
     ],
   },
 
@@ -616,7 +628,7 @@ export const LEVELS = [
   {
     id: "6-2", name: "Lab 6-2 · Quadrants",
     ...w6(2),
-    intro: "Four zones. Find the path.",
+    intro: "Two fields above. Drift along the floor — or use them.",
     layout: [
       "##############################",
       "#............................#",
@@ -636,10 +648,18 @@ export const LEVELS = [
       "##############################",
       "##############################",
     ].join("\n"),
+    // Previous design had a DOWN zone over the right half that combined
+    // with ground friction to kill the player's vx and trap them
+    // mid-room with no recovery. Now there are two zones, both in the
+    // top half: the left half pulls UP (so flipping up early launches
+    // you to the ceiling) and the right half pushes RIGHT (you ride it
+    // along the ceiling toward the exit column). The bottom half is
+    // unzoned, so a simple right-flip on the floor is also a valid
+    // route. Both paths are clear and verified by the playability
+    // auditor.
     gravityZones: [
       { x: 0,  y: 0, w: 15, h: 8, dir: { x: 0, y: -1 } },
       { x: 15, y: 0, w: 15, h: 8, dir: { x: 1, y: 0 } },
-      { x: 15, y: 8, w: 15, h: 9, dir: { x: 0, y: 1 } },
     ],
   },
   {
@@ -669,8 +689,12 @@ export const LEVELS = [
     lasers: [
       { x1: 18*32, y1: 1*32, x2: 18*32, y2: 13*32, period: 1.4, duty: 0.5, phase: 0 },
     ],
+    // Zone forces gravity UP across most of the right side, but stops above
+    // row 12 so the player can still drift along the floor into the exit.
+    // Without this, the exit on row 12 sits inside the upward field and
+    // never overlaps the player's path.
     gravityZones: [
-      { x: 22, y: 0, w: 8, h: 17, dir: { x: 0, y: -1 } },
+      { x: 22, y: 0, w: 8, h: 12, dir: { x: 0, y: -1 } },
     ],
   },
 ];

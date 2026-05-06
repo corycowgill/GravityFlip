@@ -19,7 +19,9 @@ export class UI {
       stats:   document.getElementById("win-stats"),
       timer:   document.getElementById("hud-timer"),
       best:    document.getElementById("hud-best"),
+      intro:   document.getElementById("intro-toast"),
     };
+    this._introShown = new Set(); // level ids whose intro has been shown this session
     this._wire();
     this._startHudTicker();
 
@@ -93,6 +95,7 @@ export class UI {
     this.el.win.classList.add("hidden");
     this.el.hud.classList.add("hidden");
     this.el.touch.classList.add("hidden");
+    if (this.el.intro) this.el.intro.classList.add("hidden");
     this.currentOverlay = null;
   }
 
@@ -154,6 +157,27 @@ export class UI {
     this.el.name.textContent = def.name;
     this.engine.input.setEnabled(true);
     this.game.load(def);
+    this._maybeShowIntro(def);
+  }
+
+  // Briefly show the level's intro text the first time the player enters it
+  // this session. Helps teach mechanics without nagging on every restart.
+  _maybeShowIntro(def) {
+    if (!this.el.intro || !def.intro) return;
+    if (this._introShown.has(def.id)) return;
+    this._introShown.add(def.id);
+    const el = this.el.intro;
+    el.textContent = def.intro;
+    el.classList.remove("hidden", "fading");
+    if (this._introHideTimer) clearTimeout(this._introHideTimer);
+    if (this._introDoneTimer) clearTimeout(this._introDoneTimer);
+    this._introHideTimer = setTimeout(() => {
+      el.classList.add("fading");
+      this._introDoneTimer = setTimeout(() => {
+        el.classList.add("hidden");
+        el.classList.remove("fading");
+      }, 320);
+    }, 2400);
   }
 
   showWin(info) {
