@@ -255,13 +255,42 @@ export class Game {
     const doorEase = Math.min(1, dtRaw * 9);
     this.doorAnim += (this.doorAnimTarget - this.doorAnim) * doorEase;
 
-    // Update lasers (now slowed by dt)
+    // Update lasers (now slowed by dt) — also emit endpoint sparks while active.
     for (const l of this.lasers) {
       if (l.period) {
         l.phase += dt;
         if (l.phase >= l.period) l.phase -= l.period;
         const duty = l.duty != null ? l.duty : 0.5;
         l.active = (l.phase / l.period) < duty;
+      }
+      if (l.active && this.state === "play" && Math.random() < dt * 24) {
+        // Random spark at one endpoint, kicked outward along the beam line.
+        const useStart = Math.random() < 0.5;
+        const ex = useStart ? l.x1 : l.x2;
+        const ey = useStart ? l.y1 : l.y2;
+        const len = Math.hypot(l.x2 - l.x1, l.y2 - l.y1);
+        const nx = (l.x2 - l.x1) / len, ny = (l.y2 - l.y1) / len;
+        const dirSign = useStart ? -1 : 1;
+        const angOff = (Math.random() - 0.5) * 1.4;
+        const c = Math.cos(angOff), s = Math.sin(angOff);
+        const vx = dirSign * (nx * c - ny * s) * (40 + Math.random() * 90);
+        const vy = dirSign * (nx * s + ny * c) * (40 + Math.random() * 90);
+        this._spawnParticle(ex, ey, vx, vy, 0.25 + Math.random() * 0.2, "#ffb0a0");
+      }
+    }
+
+    // Gravity zone field particles: occasionally spawn a particle inside
+    // each zone, drifting in the zone's gravity direction. Makes the field
+    // visible at a glance.
+    if (this.level && this.level.gravityZones && this.state === "play") {
+      for (const z of this.level.gravityZones) {
+        if (Math.random() < dt * 4) {
+          const px = (z.x + Math.random() * z.w) * TILE;
+          const py = (z.y + Math.random() * z.h) * TILE;
+          const sp = 70 + Math.random() * 50;
+          this._spawnParticle(px, py, z.dir.x * sp, z.dir.y * sp,
+                              0.9 + Math.random() * 0.6, "#ff90ec");
+        }
       }
     }
 
@@ -624,11 +653,25 @@ export class Game {
       sx = (Math.random() * 2 - 1) * k;
       sy = (Math.random() * 2 - 1) * k;
     }
+    // Subtle camera zoom-in on flip — scales up briefly while flipFlash > 0
+    // and eases back. Adds a punchy, cinematic emphasis to each input.
+    const flashK = this.player ? this.player.flipFlash / 0.18 : 0;
+    const zoom = 1 + Math.max(0, flashK) * 0.04;
 
     this._renderBackground(ctx);
 
+    const W = this.engine.width, H = this.engine.height;
     ctx.save();
-    ctx.translate(sx, sy);
+    // Anchor zoom around the player when one exists — feels more dramatic
+    // because the player stays centered in their personal frame.
+    let ax = W / 2, ay = H / 2;
+    if (this.player && this.player.alive) {
+      ax = this.player.x + this.player.w / 2;
+      ay = this.player.y + this.player.h / 2;
+    }
+    ctx.translate(ax, ay);
+    ctx.scale(zoom, zoom);
+    ctx.translate(-ax + sx, -ay + sy);
     this._renderLevel(ctx);
     this._renderObjects(ctx);
     this._renderSparks(ctx);
@@ -696,25 +739,53 @@ export class Game {
     ctx.restore();
   }
 
+  // Each world gets its own background palette so they feel different.
+  // Returns three gradient stops (bg0..bg2) plus three additive glow-blob
+  // colors as "r,g,b" strings.
+  _worldPalette() {
+    const w = this.def ? this.def.world : 1;
+    switch (w) {
+      case 2: // Timing — warm orange/red urgency
+        return { bg0: "#1a0d10", bg1: "#0e0710", bg2: "#040206",
+                 glowA: "255,140,80", glowB: "255,90,140", glowC: "180,90,255" };
+      case 3: // Objects — green industrial
+        return { bg0: "#0b1a14", bg1: "#06110d", bg2: "#020806",
+                 glowA: "120,255,170", glowB: "92,242,255", glowC: "200,200,120" };
+      case 4: // Desync — deep violet, off-kilter
+        return { bg0: "#160c2a", bg1: "#0a0518", bg2: "#03020a",
+                 glowA: "180,100,255", glowB: "92,242,255", glowC: "255,92,242" };
+      case 5: // Chaos — yellow / amber
+        return { bg0: "#1a1505", bg1: "#0f0c04", bg2: "#040302",
+                 glowA: "255,210,100", glowB: "255,140,80", glowC: "92,242,255" };
+      case 6: // Multi-Zone — mixed rainbow
+        return { bg0: "#0e0c25", bg1: "#080518", bg2: "#02020a",
+                 glowA: "92,242,255", glowB: "255,92,242", glowC: "255,210,100" };
+      case 1: default: // Basics — classic cyan lab
+        return { bg0: "#0b0f24", bg1: "#070a18", bg2: "#03050d",
+                 glowA: "92,242,255", glowB: "255,92,242", glowC: "120,160,255" };
+    }
+  }
+
   _renderBackground(ctx) {
     const W = this.engine.width, H = this.engine.height;
+    const palette = this._worldPalette();
 
-    // Base gradient (does not rotate — feels stable)
+    // Base gradient (does not rotate — feels stable). Tinted per world.
     const grad = ctx.createLinearGradient(0, 0, 0, H);
-    grad.addColorStop(0, "#0b0f24");
-    grad.addColorStop(0.55, "#070a18");
-    grad.addColorStop(1, "#03050d");
+    grad.addColorStop(0, palette.bg0);
+    grad.addColorStop(0.55, palette.bg1);
+    grad.addColorStop(1, palette.bg2);
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, W, H);
 
-    // Layer 1: drifting glow blobs (additive cyan / magenta)
+    // Layer 1: drifting glow blobs (additive, world-tinted)
     const t = this.t || 0;
     ctx.save();
     ctx.globalCompositeOperation = "lighter";
     const blobs = [
-      { cx: W * 0.20, cy: H * 0.30, r: H * 0.55, hue: "92,242,255", base: 0.08, drift: 1.0 },
-      { cx: W * 0.80, cy: H * 0.75, r: H * 0.55, hue: "255,92,242", base: 0.07, drift: 1.4 },
-      { cx: W * 0.50, cy: H * 0.50, r: H * 0.40, hue: "120,160,255", base: 0.05, drift: 0.7 },
+      { cx: W * 0.20, cy: H * 0.30, r: H * 0.55, hue: palette.glowA, base: 0.10, drift: 1.0 },
+      { cx: W * 0.80, cy: H * 0.75, r: H * 0.55, hue: palette.glowB, base: 0.08, drift: 1.4 },
+      { cx: W * 0.50, cy: H * 0.50, r: H * 0.40, hue: palette.glowC, base: 0.06, drift: 0.7 },
     ];
     for (const b of blobs) {
       const ox = Math.cos(t * 0.15 * b.drift) * 30;
@@ -800,6 +871,9 @@ export class Game {
       }
     }
 
+    // Pass 3: rim-lighting on exposed solid edges (additive cyan whisper).
+    this._renderWallRimGlow(ctx);
+
     // Gravity zone outlines (drawn over tiles, dashed)
     if (lvl.gravityZones) {
       for (const z of lvl.gravityZones) {
@@ -817,6 +891,40 @@ export class Game {
         ctx.restore();
       }
     }
+  }
+
+  // Rim-light: thin additive cyan lines just outside each solid edge that
+  // faces empty space, as if reflecting the ambient lab glow. Cheap because
+  // we batch all draws per layer and avoid creating gradients.
+  _renderWallRimGlow(ctx) {
+    const lvl = this.level;
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    // Inner bright line (1 px, 0.22 alpha)
+    ctx.fillStyle = "rgba(92,242,255,0.22)";
+    for (let y = 0; y < ROWS; y++) {
+      for (let x = 0; x < COLS; x++) {
+        if (lvl.getTile(x, y) !== T.SOLID) continue;
+        const tx = x * TILE, ty = y * TILE;
+        if (lvl.getTile(x, y - 1) !== T.SOLID) ctx.fillRect(tx,            ty - 1,    TILE, 1);
+        if (lvl.getTile(x, y + 1) !== T.SOLID) ctx.fillRect(tx,            ty + TILE, TILE, 1);
+        if (lvl.getTile(x - 1, y) !== T.SOLID) ctx.fillRect(tx - 1,        ty,        1,    TILE);
+        if (lvl.getTile(x + 1, y) !== T.SOLID) ctx.fillRect(tx + TILE,     ty,        1,    TILE);
+      }
+    }
+    // Outer dim line (1 px, 0.10 alpha) — a softer halo
+    ctx.fillStyle = "rgba(92,242,255,0.10)";
+    for (let y = 0; y < ROWS; y++) {
+      for (let x = 0; x < COLS; x++) {
+        if (lvl.getTile(x, y) !== T.SOLID) continue;
+        const tx = x * TILE, ty = y * TILE;
+        if (lvl.getTile(x, y - 1) !== T.SOLID) ctx.fillRect(tx,            ty - 2,    TILE, 1);
+        if (lvl.getTile(x, y + 1) !== T.SOLID) ctx.fillRect(tx,            ty + TILE + 1, TILE, 1);
+        if (lvl.getTile(x - 1, y) !== T.SOLID) ctx.fillRect(tx - 2,        ty,        1,    TILE);
+        if (lvl.getTile(x + 1, y) !== T.SOLID) ctx.fillRect(tx + TILE + 1, ty,        1,    TILE);
+      }
+    }
+    ctx.restore();
   }
 
   _renderObjects(ctx) {
@@ -1008,7 +1116,8 @@ export class Game {
     }
     ctx.restore();
 
-    // Squash/stretch on impact
+    // Squash/stretch on impact, plus a subtle idle breathing pulse so the
+    // player never feels static. Breathing fades out while squash is active.
     let sx = 1, sy = 1;
     if (p.squashT > 0) {
       const k = p.squashT / 0.13;
@@ -1016,6 +1125,9 @@ export class Game {
       const squash = 1 - 0.22 * k;
       if (p.squashAxis === "y") { sx = stretch; sy = squash; }
       else                       { sx = squash;  sy = stretch; }
+    } else {
+      const breath = 1 + 0.025 * Math.sin(this.t * 2.5);
+      sx *= breath; sy *= breath;
     }
 
     // Player as a light source: a wide soft cyan glow that "lights up"
@@ -1297,18 +1409,31 @@ function drawTile(ctx, lvl, gx, gy, t, game) {
     case T.SPIKE_L: drawSpike(ctx, lvl, gx, gy, "left"); break;
     case T.SPIKE_R: drawSpike(ctx, lvl, gx, gy, "right"); break;
     case T.EXIT: {
-      // Portal: rotating rings + soft cyan-gold glow
+      // Portal: rotating rings + soft cyan-gold glow + orbiting dots
       const cx = x + s / 2, cy = y + s / 2;
       const pulse = 0.6 + 0.4 * Math.sin(t * 4);
       // Glow halo (additive)
       ctx.save();
       ctx.globalCompositeOperation = "lighter";
-      const halo = ctx.createRadialGradient(cx, cy, 0, cx, cy, 28);
-      halo.addColorStop(0, `rgba(255,232,140,${0.5 * pulse})`);
-      halo.addColorStop(0.5, `rgba(255,200,90,${0.25 * pulse})`);
+      const halo = ctx.createRadialGradient(cx, cy, 0, cx, cy, 32);
+      halo.addColorStop(0, `rgba(255,232,140,${0.55 * pulse})`);
+      halo.addColorStop(0.5, `rgba(255,200,90,${0.28 * pulse})`);
       halo.addColorStop(1, "rgba(255,200,90,0)");
       ctx.fillStyle = halo;
-      ctx.fillRect(cx - 28, cy - 28, 56, 56);
+      ctx.fillRect(cx - 32, cy - 32, 64, 64);
+      // Orbiting dots — three at offset phases, drawing a gentle "magnetic
+      // field" feel around the portal center.
+      for (let i = 0; i < 3; i++) {
+        const ang = t * 2.3 + i * (Math.PI * 2 / 3);
+        const orbR = 13 + Math.sin(t * 3 + i) * 1.5;
+        const ox = cx + Math.cos(ang) * orbR;
+        const oy = cy + Math.sin(ang) * orbR;
+        const dotGrad = ctx.createRadialGradient(ox, oy, 0, ox, oy, 5);
+        dotGrad.addColorStop(0, `rgba(255,250,200,${0.9 * pulse})`);
+        dotGrad.addColorStop(1, "rgba(255,212,100,0)");
+        ctx.fillStyle = dotGrad;
+        ctx.fillRect(ox - 5, oy - 5, 10, 10);
+      }
       ctx.restore();
       // Rotating outer ring
       ctx.save();
@@ -1317,7 +1442,7 @@ function drawTile(ctx, lvl, gx, gy, t, game) {
       ctx.strokeStyle = `rgba(255,212,100,${0.85 * pulse})`;
       ctx.lineWidth = 2;
       ctx.beginPath();
-      ctx.arc(0, 0, 11, 0, Math.PI * 1.4); // partial arc
+      ctx.arc(0, 0, 11, 0, Math.PI * 1.4);
       ctx.stroke();
       ctx.beginPath();
       ctx.arc(0, 0, 11, Math.PI * 1.6, Math.PI * 2);

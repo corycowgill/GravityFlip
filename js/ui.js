@@ -17,8 +17,11 @@ export class UI {
       grid:    document.getElementById("level-grid"),
       name:    document.getElementById("level-name"),
       stats:   document.getElementById("win-stats"),
+      timer:   document.getElementById("hud-timer"),
+      best:    document.getElementById("hud-best"),
     };
     this._wire();
+    this._startHudTicker();
 
     // Hook game callbacks
     this.game.onWin = (info) => this.showWin(info);
@@ -28,6 +31,20 @@ export class UI {
       if (this.currentOverlay === this.el.menu) return;
       this.showMenu();
     });
+  }
+
+  // Update the live timer + best-time display 6 times/sec — frequent enough
+  // to feel responsive without thrashing the DOM.
+  _startHudTicker() {
+    setInterval(() => {
+      if (this.game.state !== "play") return;
+      if (!this.el.timer) return;
+      const t = (performance.now() - this.game.startTime) / 1000;
+      this.el.timer.textContent = t.toFixed(2);
+      const best = this.save.getBest(this.game.def && this.game.def.id);
+      if (best != null) this.el.best.textContent = `BEST ${best.toFixed(2)}`;
+      else if (this.el.best) this.el.best.textContent = "";
+    }, 160);
   }
 
   _wire() {
